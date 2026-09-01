@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Doppia Camera Recording</string>
+    <string name="app_subtitle">Registra contemporaneamente dalle telecamere frontale e posteriore</string>
+
+    <!-- Sections -->
+    <string name="section_camera">Selezione telecamera</string>
+    <string name="section_video">Qualita video</string>
+    <string name="front_video_quality">Telecamera frontale - Qualita video</string>
+    <string name="rear_video_quality">Telecamera posteriore - Qualita video</string>
+    <string name="section_manual">Controlli manuali</string>
+    <string name="section_manual_front">Controlli manuali (Frontale)</string>
+    <string name="section_manual_rear">Controlli manuali (Posteriore)</string>
+    <string name="section_audio">Audio / metro</string>
+    <string name="audio_section_title">Audio</string>
+    <string name="audio_format_label">Formato audio</string>
+    <string name="audio_format_aac">AAC</string>
+    <string name="audio_bitrate_label">Bitrate</string>
+    <string name="audio_bitrate_format">%1$d kbps</string>
+    <string name="audio_sample_rate_label">Frequenza di campionamento</string>
+    <string name="audio_sample_rate_format">%1$d Hz</string>
+    <string name="section_appearance">Aspetto</string>
+
+    <!-- Camera Selection -->
+    <string name="front_camera">Telecamera frontale</string>
+    <string name="rear_camera">Telecamera posteriore</string>
+    <string name="camera_picker_hint">Scegli quale telecamera fisica agisce da frontale o posteriore per questa sessione di registrazione.</string>
+    <string name="camera_none_available">Nessuna telecamera trovata su questo dispositivo</string>
+
+    <!-- Preview -->
+    <string name="preview_label">Anteprima live</string>
+
+    <!-- Recording -->
+    <string name="start_recording">Registra</string>
+    <string name="stop_recording">Ferma</string>
+    <string name="recording_in_progress">Registrazione...</string>
+    <string name="recording_started">Registrazione avviata</string>
+    <string name="recording_stopped">Registrazione fermata</string>
+    <string name="recording_elapsed_default">00:00</string>
+    <string name="recorded_files">Salvato: %1$s</string>
+    <string name="recording_error">Registrazione fallita: %1$s</string>
+
+    <!-- Video Quality -->
+    <string name="resolution_label">Risoluzione</string>
+    <string name="fps_label">Frame rate (FPS)</string>
+    <string name="bitrate_label">Bitrate</string>
+    <string name="fps_hint">Questo valore e una richiesta al sensore della fotocamera per ottenere il numero di frame al secondo scelto. Il sensore sceglie autonomamente il valore supportato piu vicino.</string>
+
+    <!-- Orientation -->
+    <string name="landscape_mode">Landscape</string>
+    <string name="landscape_locked_while_recording">L\'orientamento è bloccato durante la registrazione</string>
+
+    <!-- Autofocus on tap -->
+    <string name="autofocus_on_tap">Tap focus</string>
+
+    <!-- Manual Controls -->
+    <string name="manual_focus_label">Messa a fuoco manuale</string>
+    <string name="manual_focus_front_label">Messa a fuoco manuale (Frontale)</string>
+    <string name="manual_focus_rear_label">Messa a fuoco manuale (Posteriore)</string>
+    <string name="manual_focus_hint">Blocca la messa a fuoco automatica e imposta la distanza di fuoco manualmente.</string>
+    <string name="manual_adjustments_label">Regolazioni manuali (ISO, esposizione)</string>
+    <string name="manual_adjustments_front_label">Regolazioni manuali (Frontale)</string>
+    <string name="manual_adjustments_rear_label">Regolazioni manuali (Posteriore)</string>
+    <string name="manual_adjustments_hint">Blocca l\'esposizione automatica e imposta ISO / tempo di esposizione manualmente.</string>
+    <string name="focus_label">Distanza fuoco</string>
+    <string name="iso_label">ISO</string>
+    <string name="exposure_label">Tempo di esposizione</string>
+    <string name="iso_auto">Automatico</string>
+    <string name="exposure_auto">Automatico</string>
+    <string name="focus_increase">Aumenta fuoco</string>
+    <string name="focus_decrease">Diminuisci fuoco</string>
+    <string name="flash_torch_off">Flash</string>
+    <string name="flash_torch_on">Flash</string>
+    <string name="flash_label">Flash</string>
+    <string name="flash_torch_unavailable">Flash</string>
+    <string name="record_fullscreen_start">Avvia registrazione</string>
+    <string name="record_fullscreen_stop">Termina registrazione</string>
+
+    <!-- Audio / Meter -->
+    <string name="meter_hint">Metro volume in tempo reale dal microfono del telefono.</string>
+    <string name="peak_format">%1$.1f dB</string>
+    <string name="db_label">dB</string>
+
+    <!-- Fullscreen -->
+    <string name="fullscreen_preview">Anteprima schermo intero</string>
+    <string name="exit_fullscreen">Indietro</string>
+    <string name="tap_to_focus">Tocca per messa a fuoco</string>
+    <string name="toggle_controls">Mostra/nascondi controlli</string>
+    <string name="show_controls">Mostra controlli</string>
+    <string name="hide_controls">Nascondi controlli</string>
+    <string name="fallback_pair">Passato a %1$s per compatibilità doppia camera</string>
+    <string name="camera_not_working_front">La telecamera frontale non funziona. Si consiglia di cambiarla tramite il selettore Telecamera frontale.</string>
+    <string name="camera_not_working_rear">La telecamera posteriore non funziona. Si consiglia di cambiarla tramite il selettore Telecamera posteriore.</string>
+    <string name="camera_not_working_both">Nessuna delle telecamere funziona. Si consiglia di cambiarle tramite i selettori.</string>
+    <string name="camera_not_working_error">Errore telecamera. Si consiglia di cambiare le telecamere tramite i selettori.</string>
+
+    <!-- Appearance -->
+    <string name="theme_label">Tema</string>
+    <string name="theme_light">Chiaro</string>
+    <string name="theme_dark">Scuro</string>
+    <string name="language_label">Lingua</string>
+    <string name="language_english">English</string>
+    <string name="language_italian">Italiano</string>
+    <!-- Mostrato sotto il selettore del tema: per applicare correttamente il
+         tema chiaro/scuro è necessario riavviare l'app. -->
+    <string name="theme_restart_required">Riavvia l\'app per applicare correttamente il cambio di tema.</string>
+    <!-- Toast mostrato dopo la scelta del tema: conferma la modifica e ricorda
+         che è necessario riavviare l\'app per applicarla pienamente. -->
+    <string name="theme_restart_toast">Tema modificato. Riavvia l\'app per applicarlo correttamente.</string>
+
+    <!-- Settings -->
+    <string name="settings">Impostazioni</string>
+    <string name="theme_settings">Tema</string>
+    <string name="language_settings">Lingua</string>
+    <string name="meter_style">Stile metro</string>
+    <string name="no_cameras">Nessuna telecamera disponibile</string>
+    <string name="permission_required">Permessi necessari</string>
+    <string name="permission_camera_required">Il permesso fotocamera è necessario per registrare.</string>
+    <string name="permission_audio_required">Il permesso microfono è necessario per audio e registrazione.</string>
+    <string name="permission_camera_audio_required">I permessi fotocamera e microfono sono necessari.</string>
+    <string name="permission_storage_required">Il permesso di archiviazione è necessario per salvare le registrazioni.</string>
+    <string name="permission_notification_required">Il permesso notifiche mostra lo stato della registrazione.</string>
+
+    <!-- Exit / back confirmation -->
+    <string name="exit_app_title">Chiudere l\'app?</string>
+    <string name="exit_app_message">Sei sicuro di voler chiudere Registrazione Doppia Camera?</string>
+    <string name="exit_app_confirm">Chiudi</string>
+    <string name="back_blocked_while_recording">Ferma prima la registrazione per chiudere l\'app.</string>
+    <string name="service_stopped">Fermato</string>
+    <string name="service_running">Registrazione</string>
+    <string name="status_idle_detail">Pronto per la registrazione. Entrambe le telecamere saranno catturate.</string>
+    <string name="status_recording_detail">Registrazione telecamere frontale + posteriore in file separati.</string>
+
+    <!-- Settings Bottom Sheet -->
+    <string name="meter_digital">Digitale (DAW)</string>
+    <string name="meter_analog">Analogica (stile nastro)</string>
+
+    <!-- Avviso compatibilità dispositivo (mostrato all\'avvio dell\'app) -->
+    <string name="compat_alert_title">Avviso di compatibilità del dispositivo</string>
+    <string name="compat_alert_message">Questa app controlla due fotocamere contemporaneamente e utilizza direttamente l\'encoder hardware. Il comportamento, le risoluzioni supportate, i frame rate e le impostazioni audio variano da dispositivo a dispositivo — su alcuni telefoni la combinazione delle due fotocamere potrebbe non funzionare, l\'anteprima potrebbe bloccarsi, la registrazione potrebbe fallire o l\'audio potrebbe mancare. Ci sono anche limiti hardware (numero di fotocamere che possono funzionare contemporaneamente, risoluzione massima per fotocamera, frequenza di campionamento audio massima) che non possiamo aggirare. Se qualcosa non funziona come previsto, prova a cambiare la fotocamera frontale/posteriore, la risoluzione o gli FPS.</string>
+    <string name="compat_alert_dont_show_again">Non mostrare più questo avviso</string>
+    <string name="compat_alert_ok">Chiudi</string>
+</resources>

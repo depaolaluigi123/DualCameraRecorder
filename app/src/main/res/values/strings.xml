@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dual Camera Recording</string>
+    <string name="app_subtitle">Record from front and rear cameras simultaneously</string>
+
+    <!-- Sections -->
+    <string name="section_camera">Camera Selection</string>
+    <string name="section_video">Video Quality</string>
+    <string name="front_video_quality">Front Camera — Video Quality</string>
+    <string name="rear_video_quality">Rear Camera — Video Quality</string>
+    <string name="section_manual">Manual Controls</string>
+    <string name="section_manual_front">Manual Controls (Front)</string>
+    <string name="section_manual_rear">Manual Controls (Rear)</string>
+    <string name="section_audio">Audio Meter</string>
+    <string name="audio_section_title">Audio</string>
+    <string name="audio_format_label">Audio Format</string>
+    <string name="audio_format_aac">AAC</string>
+    <string name="audio_bitrate_label">Bitrate</string>
+    <string name="audio_bitrate_format">%1$d kbps</string>
+    <string name="audio_sample_rate_label">Sample Rate</string>
+    <string name="audio_sample_rate_format">%1$d Hz</string>
+    <string name="section_appearance">Appearance</string>
+
+    <!-- Camera Selection -->
+    <string name="front_camera">Front Camera</string>
+    <string name="rear_camera">Rear Camera</string>
+    <string name="camera_picker_hint">Choose which physical camera acts as front or rear for this recording session.</string>
+    <string name="camera_none_available">No camera found on this device</string>
+
+    <!-- Preview -->
+    <string name="preview_label">Live Preview</string>
+
+    <!-- Recording -->
+    <string name="start_recording">Record</string>
+    <string name="stop_recording">Stop</string>
+    <string name="recording_in_progress">Recording…</string>
+    <string name="recording_started">Recording started</string>
+    <string name="recording_stopped">Recording stopped</string>
+    <string name="recording_elapsed_default">00:00</string>
+    <string name="recorded_files">Saved: %1$s</string>
+    <string name="recording_error">Recording failed: %1$s</string>
+
+    <!-- Video Quality -->
+    <string name="resolution_label">Resolution</string>
+    <string name="fps_label">Frame Rate (FPS)</string>
+    <string name="bitrate_label">Bitrate</string>
+    <string name="fps_hint">This is a request to the camera sensor to achieve the chosen frames per second. The sensor will pick the nearest supported value.</string>
+
+    <!-- Orientation -->
+    <string name="landscape_mode">Landscape</string>
+    <string name="landscape_locked_while_recording">Orientation is locked while recording</string>
+
+    <!-- Autofocus on tap -->
+    <string name="autofocus_on_tap">Tap focus</string>
+
+    <!-- Manual Controls -->
+    <string name="manual_focus_label">Manual Focus</string>
+    <string name="manual_focus_front_label">Manual Focus (Front)</string>
+    <string name="manual_focus_rear_label">Manual Focus (Rear)</string>
+    <string name="manual_focus_hint">Lock autofocus and set the focus distance manually.</string>
+    <string name="manual_adjustments_label">Manual Adjustments (ISO, Exposure)</string>
+    <string name="manual_adjustments_front_label">Manual Adjustments (Front)</string>
+    <string name="manual_adjustments_rear_label">Manual Adjustments (Rear)</string>
+    <string name="manual_adjustments_hint">Lock auto-exposure and set ISO / exposure time manually.</string>
+    <string name="focus_label">Focus Distance</string>
+    <string name="iso_label">ISO</string>
+    <string name="exposure_label">Exposure Time</string>
+    <string name="iso_auto">Auto</string>
+    <string name="exposure_auto">Auto</string>
+    <string name="focus_increase">Increase focus</string>
+    <string name="focus_decrease">Decrease focus</string>
+    <string name="flash_torch_off">Flash</string>
+    <string name="flash_torch_on">Flash</string>
+    <string name="flash_label">Flash</string>
+    <string name="flash_torch_unavailable">Flash</string>
+    <string name="record_fullscreen_start">Start recording</string>
+    <string name="record_fullscreen_stop">Stop recording</string>
+
+    <!-- Audio / Meter -->
+    <string name="meter_hint">Real-time volume meter from the phone microphone.</string>
+    <string name="peak_format">%1$.1f dB</string>
+    <string name="db_label">dB</string>
+
+    <!-- Fullscreen -->
+    <string name="fullscreen_preview">Fullscreen Preview</string>
+    <string name="exit_fullscreen">Back</string>
+    <string name="tap_to_focus">Tap to focus</string>
+    <string name="toggle_controls">Toggle controls</string>
+    <string name="show_controls">Show controls</string>
+    <string name="hide_controls">Hide controls</string>
+    <string name="fallback_pair">Switched to %1$s for dual-camera compatibility</string>
+    <string name="camera_not_working_front">Front camera is not working. Please change the camera in the Front Camera selector.</string>
+    <string name="camera_not_working_rear">Rear camera is not working. Please change the camera in the Rear Camera selector.</string>
+    <string name="camera_not_working_both">Neither camera is working. Please change one or both cameras in the selectors.</string>
+    <string name="camera_not_working_error">Camera error. Please try changing the cameras in the selectors.</string>
+
+    <!-- Appearance -->
+    <string name="theme_label">Theme</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
+    <string name="language_label">Language</string>
+    <string name="language_english">English</string>
+    <string name="language_italian">Italiano</string>
+    <!-- Shown under the theme toggle. The Light/Dark theme styles are loaded
+         via setTheme() in onCreate() which requires an Activity recreate; on
+         some devices the recreate alone is not enough to fully refresh the
+         dark/light palette. The user must close and reopen the app for the
+         change to take full effect. -->
+    <string name="theme_restart_required">Restart the app for the theme change to take full effect.</string>
+    <!-- Toast shown after the user picks a theme: confirms the change and
+         reminds them a restart is required for full effect. -->
+    <string name="theme_restart_toast">Theme changed. Restart the app to apply it fully.</string>
+
+    <!-- Settings -->
+    <string name="settings">Settings</string>
+    <string name="theme_settings">Theme</string>
+    <string name="language_settings">Language</string>
+    <string name="meter_style">Meter Style</string>
+    <string name="no_cameras">No cameras available</string>
+    <string name="permission_required">Permissions required</string>
+    <string name="permission_camera_required">Camera permission is required for recording.</string>
+    <string name="permission_audio_required">Microphone permission is required for audio and recording.</string>
+    <string name="permission_camera_audio_required">Camera and microphone permissions are required.</string>
+    <string name="permission_storage_required">Storage permission is required to save recordings.</string>
+    <string name="permission_notification_required">Notification permission shows recording status.</string>
+
+    <!-- Exit / back confirmation -->
+    <string name="exit_app_title">Close app?</string>
+    <string name="exit_app_message">Are you sure you want to close Dual Camera Recording?</string>
+    <string name="exit_app_confirm">Close</string>
+    <string name="back_blocked_while_recording">Stop the recording first to close the app.</string>
+    <string name="service_stopped">Stopped</string>
+    <string name="service_running">Recording</string>
+    <string name="status_idle_detail">Ready to record. Both cameras will be captured.</string>
+    <string name="status_recording_detail">Recording front + rear cameras to separate files.</string>
+
+    <!-- Settings Bottom Sheet -->
+    <string name="meter_digital">Digital (DAW)</string>
+    <string name="meter_analog">Analog (tape style)</string>
+
+    <!-- Device compatibility alert (shown at app startup) -->
+    <string name="compat_alert_title">Device compatibility notice</string>
+    <string name="compat_alert_message">This app drives two cameras at once and uses the hardware encoder directly. Behaviour, supported resolutions, frame rates and audio settings vary from device to device — on some phones the dual-camera combination may not work, the preview may freeze, the recording may fail, or the audio may be missing. There are also hardware limits (number of cameras that can run concurrently, max resolution per camera, max audio sample rate) that we cannot bypass. If something does not work as expected, try changing the front / rear camera, the resolution, or the FPS.</string>
+    <string name="compat_alert_dont_show_again">Don\'t show this again</string>
+    <string name="compat_alert_ok">Close</string>
+</resources>

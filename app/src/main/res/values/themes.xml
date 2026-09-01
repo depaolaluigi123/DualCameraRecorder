@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App-owned themes: not DayNight, not linked to system dark mode.
+         The user picks light or dark explicitly via ThemeManager. -->
+
+    <style name="Theme.DualCameraRecorder.Light" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">@color/color_primary</item>
+        <item name="colorPrimaryDark">@color/color_primary_variant</item>
+        <item name="colorSecondary">@color/color_secondary</item>
+        <item name="colorOnPrimary">@color/color_on_primary</item>
+        <item name="colorOnSecondary">@color/color_on_secondary</item>
+        <item name="android:colorBackground">@color/color_background</item>
+        <item name="android:windowBackground">@color/color_background</item>
+        <item name="colorSurface">@color/color_surface</item>
+        <item name="colorSurfaceVariant">@color/color_surface_variant</item>
+        <item name="colorOutline">@color/color_outline</item>
+        <item name="colorOnSurface">@color/color_text_primary</item>
+        <item name="colorOnSurfaceVariant">@color/color_text_secondary</item>
+        <item name="android:statusBarColor">@color/color_background</item>
+        <item name="android:navigationBarColor">@color/color_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+
+        <!-- Meter attributes -->
+        <item name="meterTrackColor">@color/meter_track</item>
+        <item name="meterSafeColor">@color/meter_safe</item>
+        <item name="meterWarnColor">@color/meter_warn</item>
+        <item name="meterPeakColor">@color/meter_peak</item>
+        <item name="recordColor">@color/record_color</item>
+        <item name="meterNeedleColor">@color/meter_needle</item>
+        <item name="meterScaleColor">@color/meter_scale</item>
+        <item name="elapsedIdleColor">@color/elapsed_idle_color</item>
+    </style>
+
+    <style name="Theme.DualCameraRecorder.Dark" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/color_primary</item>
+        <item name="colorPrimaryDark">@color/color_primary_variant</item>
+        <item name="colorSecondary">@color/color_secondary</item>
+        <item name="colorOnPrimary">@color/color_on_primary</item>
+        <item name="colorOnSecondary">@color/color_on_secondary</item>
+        <item name="android:colorBackground">@color/color_background</item>
+        <item name="android:windowBackground">@color/color_background</item>
+        <item name="colorSurface">@color/color_surface</item>
+        <item name="colorSurfaceVariant">@color/color_surface_variant</item>
+        <item name="colorOutline">@color/color_outline</item>
+        <item name="colorOnSurface">@color/color_text_primary</item>
+        <item name="colorOnSurfaceVariant">@color/color_text_secondary</item>
+        <item name="android:statusBarColor">@color/color_background</item>
+        <item name="android:navigationBarColor">@color/color_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- Meter attributes -->
+        <item name="meterTrackColor">@color/meter_track</item>
+        <item name="meterSafeColor">@color/meter_safe</item>
+        <item name="meterWarnColor">@color/meter_warn</item>
+        <item name="meterPeakColor">@color/meter_peak</item>
+        <item name="recordColor">@color/record_color</item>
+        <item name="meterNeedleColor">@color/meter_needle</item>
+        <item name="meterScaleColor">@color/meter_scale</item>
+        <item name="elapsedIdleColor">@color/elapsed_idle_color</item>
+    </style>
+
+    <!-- Default theme: alias to Dark -->
+    <style name="Theme.DualCameraRecorder" parent="Theme.DualCameraRecorder.Dark" />
+
+    <!-- Fullscreen theme: no action bar, immersive, dark background for previews -->
+    <style name="Theme.DualCameraRecorder.Fullscreen" parent="Theme.DualCameraRecorder.Dark">
+        <item name="android:windowBackground">@color/preview_background</item>
+        <item name="android:colorBackground">@color/preview_background</item>
+        <item name="colorSurface">@color/preview_background</item>
+        <item name="android:statusBarColor">@color/preview_background</item>
+        <item name="android:navigationBarColor">@color/preview_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="windowActionBar">false</item>
+        <item name="windowActionBarOverlay">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+</resources>

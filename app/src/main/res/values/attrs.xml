@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Meter theme attributes (resolved via ThemeManager.loadPaletteColors / resolveThemeColor) -->
+    <attr name="meterTrackColor" format="color" />
+    <attr name="meterSafeColor" format="color" />
+    <attr name="meterWarnColor" format="color" />
+    <attr name="meterPeakColor" format="color" />
+    <attr name="recordColor" format="color" />
+    <attr name="meterNeedleColor" format="color" />
+    <attr name="meterScaleColor" format="color" />
+    <attr name="elapsedIdleColor" format="color" />
+</resources>
