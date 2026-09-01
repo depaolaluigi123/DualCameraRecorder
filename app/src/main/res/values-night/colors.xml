@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark theme colors -->
+    <color name="color_primary">#D0BCFF</color>
+    <color name="color_primary_variant">#BB86FC</color>
+    <color name="color_secondary">#03DAC6</color>
+    <color name="color_on_primary">#000000</color>
+    <color name="color_on_secondary">#000000</color>
+    <color name="color_background">#121212</color>
+    <color name="color_surface">#1E1E1E</color>
+    <color name="color_surface_variant">#373035</color>
+    <color name="color_outline">#424242</color>
+    <color name="color_text_primary">#E0E0E0</color>
+    <color name="color_text_secondary">#A09A92</color>
+
+    <!-- Divider -->
+    <color name="divider">#424242</color>
+
+    <!-- Preview background remains black -->
+    <color name="preview_background">#000000</color>
+
+    <!-- Meter colors (same for dark theme) -->
+    <color name="meter_track">#424242</color>
+    <color name="meter_safe">#4CAF50</color>
+    <color name="meter_warn">#FF9800</color>
+    <color name="meter_danger">#F44336</color>
+    <color name="meter_peak">#FFFFFF</color>
+    <color name="meter_needle">#FFFFFF</color>
+    <color name="meter_scale">#B0B0B0</color>
+
+    <!-- Record color -->
+    <color name="record_color">#F44336</color>
+
+    <!-- Elapsed time color -->
+    <color name="elapsed_idle_color">#B0B0B0</color>
+
+    <!-- Error color -->
+    <color name="error">#FF5252</color>
+    <color name="on_error">#000000</color>
+
+    <!-- Launcher background -->
+    <color name="ic_launcher_background">#D0BCFF</color>
+</resources>

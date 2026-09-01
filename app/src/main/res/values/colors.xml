@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Theme color names used in themes.xml -->
+    <color name="color_primary">#0B6E4F</color>
+    <color name="color_primary_variant">#095C42</color>
+    <color name="color_secondary">#1B4965</color>
+    <color name="color_on_primary">#FFFFFF</color>
+    <color name="color_on_secondary">#FFFFFF</color>
+    <color name="color_background">#FFFFFFFF</color>
+    <color name="color_surface">#FFFFFFFF</color>
+    <color name="color_surface_variant">#E8EEF6</color>
+    <color name="color_outline">#C9D4E0</color>
+    <color name="color_text_primary">#12263A</color>
+    <color name="color_text_secondary">#5A6B7B</color>
+
+    <!-- Divider -->
+    <color name="divider">#E0E0E0</color>
+
+    <!-- Preview background. In the Light theme the Fullscreen Preview overlay
+         and any large dark areas should match the white activity background
+         (the user requested this so the Fullscreen Preview does not look black
+         in Light mode). The TextureViews still render the camera feed on top,
+         so this only shows in the brief moment before the feed arrives. -->
+    <color name="preview_background">#FFFFFFFF</color>
+
+    <!-- Meter colors -->
+    <color name="meter_track">#212121</color>
+    <color name="meter_safe">#4CAF50</color>
+    <color name="meter_warn">#FF9800</color>
+    <color name="meter_danger">#F44336</color>
+    <color name="meter_peak">#FFFFFF</color>
+    <color name="meter_needle">#FFFFFF</color>
+    <color name="meter_scale">#B0B0B0</color>
+
+    <!-- Record colors -->
+    <color name="record_color">#F44336</color>
+    <color name="color_danger">#C0392B</color>
+    <color name="color_success">#1F8A5B</color>
+    <!-- Brighter green used for the recording-active state — matches ic_stop_square so
+         the icon and button stroke read as the same colour. -->
+    <color name="color_record_stop">#2ECC71</color>
+
+    <!-- Elapsed time color -->
+    <color name="elapsed_idle_color">#B0B0B0</color>
+
+    <!-- Status dot colors -->
+    <color name="color_status_idle">#8A97A5</color>
+    <color name="color_status_active">#1F8A5B</color>
+
+    <!-- Error color -->
+    <color name="error">#B3261E</color>
+    <color name="on_error">#FFFFFF</color>
+
+    <!-- Launcher background -->
+    <color name="ic_launcher_background">#0B6E4F</color>
+</resources>
