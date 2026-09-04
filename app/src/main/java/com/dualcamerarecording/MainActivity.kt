@@ -136,6 +136,15 @@ class MainActivity : AppCompatActivity() {
     private var isFrontManualAdjustments = false
     private var isRearManualAdjustments = false
 
+    // Per-camera linear-zoom state in `[0, 1]` (0 = no zoom, 1 = max digital zoom).
+    // Held in-memory only: the user has to re-pick zoom on every launch (matches
+    // the AndroidCamera reference's "not persisted" pattern for transient capture
+    // state, and keeps the persisted preference set minimal). The CameraController
+    // also remembers the value across session rebuilds, so the zoom is re-applied
+    // on every preview restart via [dualCameraRecorder.reapplyLinearZoom].
+    private var frontLinearZoom = 0f
+    private var rearLinearZoom = 0f
+
     // All permissions the app needs in order to function. The list is built
     // once on construction from the manifest + API level so we request exactly
     // what the OS expects:
@@ -361,6 +370,7 @@ class MainActivity : AppCompatActivity() {
         setupAudioSpinners()
         setupManualControls()
         setupFocusSeekBar()
+        setupZoomSeekBar()
 
         // Notify the user (via Toast) when the empirical retry loop in DualCameraRecorder
         // swapped to a different (front, rear) pair than the one we asked for (because
@@ -1451,6 +1461,96 @@ class MainActivity : AppCompatActivity() {
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
 
+    // ==================== Zoom SeekBars (per camera, main + fullscreen) ====================
+    //
+    // Mirrors the AndroidCamera reference's setLinearZoom + SeekBar pattern, but the
+    // slider is theme-aware (colorPrimary / colorOutline via the custom progressDrawable)
+    // and a single SeekBarListener pair is shared between the main-activity and
+    // fullscreen-overlay bars (the two are kept in sync the same way the focus
+    // seekbars are).
+
+    private fun setupZoomSeekBar() {
+        // Front camera zoom seekbars
+        binding.zoomSeekBarFront.max = 100
+        binding.zoomSeekBarFront.progress = (frontLinearZoom * 100f).toInt().coerceIn(0, 100)
+        binding.zoomSeekBarFront.setOnSeekBarChangeListener(frontZoomSeekListener)
+
+        binding.zoomSeekBarFullscreenFront.max = 100
+        binding.zoomSeekBarFullscreenFront.progress = (frontLinearZoom * 100f).toInt().coerceIn(0, 100)
+        binding.zoomSeekBarFullscreenFront.setOnSeekBarChangeListener(fullscreenFrontZoomSeekListener)
+
+        // Rear camera zoom seekbars
+        binding.zoomSeekBarRear.max = 100
+        binding.zoomSeekBarRear.progress = (rearLinearZoom * 100f).toInt().coerceIn(0, 100)
+        binding.zoomSeekBarRear.setOnSeekBarChangeListener(rearZoomSeekListener)
+
+        binding.zoomSeekBarFullscreenRear.max = 100
+        binding.zoomSeekBarFullscreenRear.progress = (rearLinearZoom * 100f).toInt().coerceIn(0, 100)
+        binding.zoomSeekBarFullscreenRear.setOnSeekBarChangeListener(fullscreenRearZoomSeekListener)
+
+        // Front +/- buttons
+        binding.btnZoomMinusFront.setOnClickListener { changeZoomFront(-5) }
+        binding.btnZoomPlusFront.setOnClickListener { changeZoomFront(5) }
+        binding.btnZoomMinusFullscreenFront.setOnClickListener { changeZoomFront(-5) }
+        binding.btnZoomPlusFullscreenFront.setOnClickListener { changeZoomFront(5) }
+
+        // Rear +/- buttons
+        binding.btnZoomMinusRear.setOnClickListener { changeZoomRear(-5) }
+        binding.btnZoomPlusRear.setOnClickListener { changeZoomRear(5) }
+        binding.btnZoomMinusFullscreenRear.setOnClickListener { changeZoomRear(-5) }
+        binding.btnZoomPlusFullscreenRear.setOnClickListener { changeZoomRear(5) }
+    }
+
+    // Programmatic progress changes call onProgressChanged with fromUser=false, so the
+    // fromUser guard alone prevents the two paired seekbars from recursing into each other.
+    private val frontZoomSeekListener = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) {
+                frontLinearZoom = (progress / 100f).coerceIn(0f, 1f)
+                binding.zoomSeekBarFullscreenFront.progress = progress
+                applyLinearZoomToFrontCamera()
+            }
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    }
+
+    private val fullscreenFrontZoomSeekListener = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) {
+                frontLinearZoom = (progress / 100f).coerceIn(0f, 1f)
+                binding.zoomSeekBarFront.progress = progress
+                applyLinearZoomToFrontCamera()
+            }
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    }
+
+    private val rearZoomSeekListener = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) {
+                rearLinearZoom = (progress / 100f).coerceIn(0f, 1f)
+                binding.zoomSeekBarFullscreenRear.progress = progress
+                applyLinearZoomToRearCamera()
+            }
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    }
+
+    private val fullscreenRearZoomSeekListener = object : SeekBar.OnSeekBarChangeListener {
+        override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+            if (fromUser) {
+                rearLinearZoom = (progress / 100f).coerceIn(0f, 1f)
+                binding.zoomSeekBarRear.progress = progress
+                applyLinearZoomToRearCamera()
+            }
+        }
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+    }
+
     // ==================== State Observation ====================
 
     private fun observeSettings() {
@@ -1708,6 +1808,11 @@ class MainActivity : AppCompatActivity() {
             // this re-apply, the user-visible flash state is "on" (settings + icon) but
             // the rear camera is not actually firing the torch.
             applyFlashStateAfterCameraStart()
+            // Re-apply the user's zoom level on the new controllers — every preview
+            // restart creates a fresh CameraController whose internal linearZoom is
+            // 0, so without this the user would see the preview snap to 1.0x after
+            // every camera switch / fullscreen toggle.
+            dualCameraRecorder.reapplyLinearZoom(frontLinearZoom, rearLinearZoom)
             requestPreviewTransforms()
             Log.d(TAG, "Preview started: front=$frontCamId, rear=$rearCamId")
         } else {
@@ -1785,6 +1890,9 @@ class MainActivity : AppCompatActivity() {
             dualCameraRecorder.setCaptureBlocked(false)
             // Re-apply the saved flash state (see comment in startCamerasIfReady).
             applyFlashStateAfterCameraStart()
+            // Re-apply the user's zoom level on the new controllers (see comment
+            // in startCamerasIfReady).
+            dualCameraRecorder.reapplyLinearZoom(frontLinearZoom, rearLinearZoom)
             requestPreviewTransforms()
         } else {
             // SurfaceTexture not ready — back off briefly and retry. Was 300 ms;
@@ -1903,6 +2011,9 @@ class MainActivity : AppCompatActivity() {
         dualCameraRecorder.setCaptureBlocked(false)
         // Re-apply the saved flash state (see comment in startCamerasIfReady).
         applyFlashStateAfterCameraStart()
+        // Re-apply the user's zoom level on the new controllers (see comment
+        // in startCamerasIfReady).
+        dualCameraRecorder.reapplyLinearZoom(frontLinearZoom, rearLinearZoom)
         requestPreviewTransforms()
     }
 
@@ -2095,6 +2206,12 @@ class MainActivity : AppCompatActivity() {
             binding.statusTitle.setText(R.string.recording_in_progress)
             binding.statusDetail.setText(R.string.status_recording_detail)
             binding.elapsedText.visibility = View.VISIBLE
+
+            // Re-apply the user's zoom level on the freshly-created recording
+            // controllers. startRecording() builds new CameraController instances
+            // whose internal linearZoom is 0, so without this the recorded video
+            // would lose the zoom the user set during preview.
+            dualCameraRecorder.reapplyLinearZoom(frontLinearZoom, rearLinearZoom)
 
             Toast.makeText(this, R.string.recording_started, Toast.LENGTH_SHORT).show()
         } else {
@@ -2533,6 +2650,37 @@ class MainActivity : AppCompatActivity() {
         binding.focusSeekBarRear.progress = next
         binding.focusSeekBarFullscreenRear.progress = next
         applyFocusToRearCamera()
+    }
+
+    // Apply the current linear zoom to the front camera. No-op when the camera
+    // is not yet open — the controller remembers the last value and re-applies
+    // it on the next preview start (see [DualCameraRecorder.reapplyLinearZoom]).
+    private fun applyLinearZoomToFrontCamera() {
+        dualCameraRecorder.setLinearZoom(isFront = true, linearZoom = frontLinearZoom)
+    }
+
+    // Apply the current linear zoom to the rear camera. Same semantics as the
+    // front version.
+    private fun applyLinearZoomToRearCamera() {
+        dualCameraRecorder.setLinearZoom(isFront = false, linearZoom = rearLinearZoom)
+    }
+
+    // Change front camera zoom by [delta] progress units (5 ≈ 5% of the slider range).
+    private fun changeZoomFront(delta: Int) {
+        val next = (frontLinearZoom * 100f + delta).toInt().coerceIn(0, 100)
+        frontLinearZoom = next / 100f
+        binding.zoomSeekBarFront.progress = next
+        binding.zoomSeekBarFullscreenFront.progress = next
+        applyLinearZoomToFrontCamera()
+    }
+
+    // Change rear camera zoom by [delta] progress units.
+    private fun changeZoomRear(delta: Int) {
+        val next = (rearLinearZoom * 100f + delta).toInt().coerceIn(0, 100)
+        rearLinearZoom = next / 100f
+        binding.zoomSeekBarRear.progress = next
+        binding.zoomSeekBarFullscreenRear.progress = next
+        applyLinearZoomToRearCamera()
     }
 
     // ==================== Fullscreen ====================

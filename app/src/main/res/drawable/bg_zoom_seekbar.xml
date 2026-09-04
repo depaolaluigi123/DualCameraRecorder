@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Theme-aware zoom slider for the main activity.
+     Pairs a filled progress shape (colorPrimary) on the left of the thumb with
+     an outline-coloured track on the right. Used as `android:progressDrawable`
+     on the SeekBar; the matching thumb drawable is `thumb_zoom_seekbar.xml`.
+
+     The theme attr is resolved at inflation time so the colours automatically
+     switch between Light (green / blue-grey) and Dark (lavender / warm grey)
+     without any per-theme override. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <corners android:radius="3dp" />
+            <solid android:color="?attr/colorOutline" />
+        </shape>
+    </item>
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape android:shape="rectangle">
+                <corners android:radius="3dp" />
+                <solid android:color="?attr/colorPrimary" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>

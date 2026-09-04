@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Empty portion of the zoom slider (right of the thumb).
+     Uses the theme outline colour so the track is visible but unobtrusive on both
+     Light and Dark themes. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="3dp" />
+    <solid android:color="?attr/colorOutline" />
+</shape>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Filled portion of the zoom slider for the fullscreen overlay.
+     Hardcoded white because the fullscreen overlay always sits on top of a dark
+     preview background regardless of the Light/Dark theme. Mirrors the white
+     tint applied to the other fullscreen controls (top bar, checkboxes, focus
+     +/- buttons). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="3dp" />
+    <solid android:color="#FFFFFF" />
+</shape>

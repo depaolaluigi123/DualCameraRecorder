@@ -752,6 +752,43 @@ class DualCameraRecorder {
     }
 
     /**
+     * Apply a digital zoom level to one of the two cameras.
+     *
+     * [linearZoom] is in `[0, 1]` (0 = no zoom, 1 = max digital zoom). The value is
+     * applied to the active controller via [CameraController.setLinearZoom], which
+     * crops the sensor active array to a centred rectangle and pushes the crop via
+     * `SCALER_CROP_REGION`. The controller remembers the value across session
+     * rebuilds (see [CameraController.reapplyLinearZoom]).
+     *
+     * No-op when the chosen camera's controller is not currently open (e.g. before
+     * the first preview starts, or after [closePreview] / [release]).
+     */
+    fun setLinearZoom(isFront: Boolean, linearZoom: Float) {
+        val controller = if (isFront) frontController else rearController
+        controller?.setLinearZoom(linearZoom)
+    }
+
+    /**
+     * Re-apply the user-set zoom level on both cameras. Called by
+     * [com.dualcamerarecording.MainActivity] right after a fresh preview / recording
+     * session is set up, so the zoom survives a camera restart (each preview
+     * restart creates fresh controllers that have no memory of the previous crop).
+     *
+     * The values are supplied by the Activity, which is the single owner of the
+     * user-facing zoom state (it survives fullscreen toggles inside the Activity
+     * instance). The new controllers have no way of knowing what zoom level was
+     * previously chosen, so passing the value explicitly is the only way to keep
+     * the camera output in sync with the SeekBar.
+     *
+     * Each controller is a no-op when its own [linearZoom] is 0 (1.0× crop is the
+     * default and produces no `SCALER_CROP_REGION` write).
+     */
+    fun reapplyLinearZoom(frontLinearZoom: Float, rearLinearZoom: Float) {
+        frontController?.reapplyLinearZoom(frontLinearZoom)
+        rearController?.reapplyLinearZoom(rearLinearZoom)
+    }
+
+    /**
      * Toggle the torch of the REAR camera. This is the dedicated API the UI's
      * flash button calls — it ALWAYS targets the rear camera (which is the
      * only flash unit on the phone) regardless of which physical camera is

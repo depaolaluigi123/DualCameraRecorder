@@ -61,6 +61,20 @@ class CameraController(
     var manualExposureEnabled: Boolean = false
         private set
 
+    /**
+     * Last digital-zoom crop applied to the sensor active array; null = full frame.
+     * Tracked so subsequent capture requests (e.g. after a focus change or target
+     * rotation) re-apply the same crop and the zoom doesn't snap back to 1.0x.
+     */
+    private var currentCrop: android.graphics.Rect? = null
+
+    /**
+     * Linear zoom value in [0, 1] — 0 is no zoom, 1 is the device's max digital
+     * zoom. Kept in sync with [currentCrop] so we can re-apply the crop on every
+     * capture request (start preview, focus change, target rotation, etc.).
+     */
+    private var linearZoom: Float = 0f
+
     // Torch. null = not yet set; otherwise on/off.
     private var torchOn: Boolean = false
     private var flashAvailable: Boolean = false
@@ -625,6 +639,11 @@ class CameraController(
             exposureCompensation?.let { builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, it) }
         }
 
+        // Re-apply the current digital-zoom crop on every capture request. Without
+        // this, any subsequent preview update (focus change, target rotation, torch
+        // toggle) would clear SCALER_CROP_REGION and snap zoom back to 1.0x.
+        currentCrop?.let { builder.set(CaptureRequest.SCALER_CROP_REGION, it) }
+
         // Flash is applied last and only if available, so it overrides correctly.
         applyFlashToBuilder(builder)
 
@@ -658,6 +677,134 @@ class CameraController(
             session.capture(builder.build(), null, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to capture image: ${e.message}")
+        }
+    }
+
+    /**
+     * Apply a digital zoom level.
+     *
+     * [linearZoom] is in `[0, 1]`, where 0 = no zoom (full frame) and 1 = the device's
+     * `SCALER_AVAILABLE_MAX_DIGITAL_ZOOM` factor. The math mirrors the AndroidCamera
+     * reference: the sensor active array is cropped to a centred rectangle of size
+     * `sensor / zoom` and the crop is pushed via `SCALER_CROP_REGION` on the same
+     * TEMPLATE_RECORD preview request used for everything else.
+     *
+     * Implementation notes (also matching the reference):
+     *  - The crop region is stored in [currentCrop] and re-applied on every subsequent
+     *    capture request (see [createCaptureRequest]) so other manual-control changes
+     *    (focus, ISO, exposure, torch) don't accidentally snap zoom back to 1.0x.
+     *  - The full manual-control state is preserved on the builder (AF/AE mode, ISO,
+     *    exposure, focus distance, FPS, flash) so toggling zoom never reverts the
+     *    user to AUTO mode.
+     *  - If the repeating request fails (e.g. on OEM HALs that drop the request when
+     *    the crop is too small) we kick the session with a one-shot capture() and
+     *    retry the repeating request.
+     *  - **State is written before the device/session null-check**: the user-set
+     *    [linearZoom] (and the computed [currentCrop]) are stored eagerly so that
+     *    a `setLinearZoom` call made before the camera finishes opening is not
+     *    lost. The Activity's reapply path (`DualCameraRecorder.reapplyLinearZoom`)
+     *    is racy: it runs synchronously after `startPreview()` (which only spawns
+     *    the async open thread) and previously the state was discarded because
+     *    the device and session were still null. Storing the state eagerly means
+     *    the FIRST `createCaptureRequest` after the session is configured (i.e.
+     *    the very first preview frame) already carries the right crop, so the
+     *    user never sees the preview snap back to 1.0x on fullscreen toggle /
+     *    preview restart / recording start.
+     */
+    @WorkerThread
+    fun setLinearZoom(linearZoom: Float) {
+        val clamped = linearZoom.coerceIn(0f, 1f)
+        this.linearZoom = clamped
+        // Compute and cache the crop eagerly. Reading camera characteristics does
+        // not require the camera to be open, so this works even when called from
+        // a reapply that happens before `cameraDevice` is non-null.
+        currentCrop = computeCropForLinearZoom(clamped)
+
+        val device = cameraDevice ?: return
+        val session = captureSession ?: return
+        val crop = currentCrop
+        runCatching {
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                previewSurface?.let { addTarget(it) }
+                recordSurface?.let { addTarget(it) }
+                if (crop != null) {
+                    set(CaptureRequest.SCALER_CROP_REGION, crop)
+                }
+                // Preserve all manual settings so zoom changes never revert the
+                // capture session to AUTO mode.
+                if (manualFocusEnabled) {
+                    focusDistance?.let { set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                } else {
+                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                }
+                if (manualExposureEnabled) {
+                    isoValue?.let { set(CaptureRequest.SENSOR_SENSITIVITY, it) }
+                    exposureTimeNanos?.let { set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                } else {
+                    set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                    exposureCompensation?.let { set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, it) }
+                }
+                applyFlashToBuilder(this)
+            }
+            try {
+                session.setRepeatingRequest(builder.build(), null, handler)
+            } catch (e: Exception) {
+                Log.w(TAG, "setLinearZoom: setRepeatingRequest failed, kicking with capture(): ${e.message}")
+                runCatching { session.capture(builder.build(), null, handler) }
+                runCatching { session.setRepeatingRequest(builder.build(), null, handler) }
+            }
+        }.onFailure {
+            Log.w(TAG, "Camera2 zoom failed: ${it.message}")
+        }
+    }
+
+    /**
+     * Compute the `SCALER_CROP_REGION` rectangle for a given linear zoom level.
+     * Returns null when the value is 0 (full frame, no crop needed) or when the
+     * camera characteristics cannot be read (the camera id is invalid or the
+     * service is down). Reading characteristics is cheap and does not require
+     * the camera to be open, so this can be called from a reapply that races
+     * the asynchronous open callback.
+     */
+    private fun computeCropForLinearZoom(linearZoom: Float): android.graphics.Rect? {
+        if (linearZoom <= 0f) return null
+        val cm = cameraManager
+        val chars = try {
+            cm?.getCameraCharacteristics(cameraId)
+        } catch (e: Exception) {
+            null
+        } ?: return null
+        val range = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM) ?: 1f
+        val zoom = 1f + (range - 1f) * linearZoom
+        val sensor = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE) ?: return null
+        val centerX = sensor.width() / 2
+        val centerY = sensor.height() / 2
+        val halfW = (sensor.width() / (2f * zoom)).toInt()
+        val halfH = (sensor.height() / (2f * zoom)).toInt()
+        return android.graphics.Rect(
+            centerX - halfW,
+            centerY - halfH,
+            centerX + halfW,
+            centerY + halfH
+        )
+    }
+
+    /**
+     * Apply the user-set zoom level to this controller's camera. Called from
+     * [DualCameraRecorder] right after the camera is opened and the capture session
+     * is configured, so the user-visible zoom state matches what the camera
+     * actually does. The CameraController instance is replaced on every preview
+     * restart, so the new one has no memory of the previous crop; the caller
+     * (the Activity) supplies the value from its in-memory `frontLinearZoom` /
+     * `rearLinearZoom` fields. No-op when [linearZoom] is 0 (the default value
+     * already produces a 1.0x crop with no SCALER_CROP_REGION write).
+     */
+    @WorkerThread
+    fun reapplyLinearZoom(linearZoom: Float) {
+        if (linearZoom > 0f) {
+            setLinearZoom(linearZoom)
         }
     }
 

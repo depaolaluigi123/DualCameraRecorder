@@ -69,6 +69,9 @@
     <string name="exposure_auto">Auto</string>
     <string name="focus_increase">Increase focus</string>
     <string name="focus_decrease">Decrease focus</string>
+    <string name="zoom_label">Zoom</string>
+    <string name="zoom_increase">Increase zoom</string>
+    <string name="zoom_decrease">Decrease zoom</string>
     <string name="flash_torch_off">Flash</string>
     <string name="flash_torch_on">Flash</string>
     <string name="flash_label">Flash</string>

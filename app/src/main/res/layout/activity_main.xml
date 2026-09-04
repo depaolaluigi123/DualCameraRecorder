@@ -330,6 +330,132 @@
             </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
 
+            <!-- ===== Zoom Row (front left, rear right) ===== -->
+            <!-- Digital zoom for both cameras lives here, side-by-side, so it is
+                 reachable in one tap from the live preview without scrolling into
+                 the per-camera manual sections. Implements the same
+                 setLinearZoom + SCALER_CROP_REGION pattern as the AndroidCamera
+                 reference, but the slider is styled to match this app's theme
+                 via the bg_zoom_seekbar / thumb_zoom_seekbar drawables (which
+                 resolve colorPrimary / colorOutline at runtime so the seekbar
+                 tracks the light/dark theme). -->
+            <LinearLayout
+                android:id="@+id/zoomRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <!-- Front camera zoom column -->
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/zoomLabelFront"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/zoom_label"
+                        android:textColor="@color/color_text_secondary"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <ImageButton
+                            android:id="@+id/btnZoomMinusFront"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/zoom_decrease"
+                            android:src="@android:drawable/ic_media_previous"
+                            android:tint="@color/color_text_primary" />
+
+                        <SeekBar
+                            android:id="@+id/zoomSeekBarFront"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:layout_marginEnd="4dp"
+                            android:layout_weight="1"
+                            android:max="100"
+                            android:progress="0"
+                            android:progressDrawable="@drawable/bg_zoom_seekbar"
+                            android:thumb="@drawable/thumb_zoom_seekbar" />
+
+                        <ImageButton
+                            android:id="@+id/btnZoomPlusFront"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/zoom_increase"
+                            android:src="@android:drawable/ic_media_next"
+                            android:tint="@color/color_text_primary" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Rear camera zoom column -->
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/zoomLabelRear"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/zoom_label"
+                        android:textColor="@color/color_text_secondary"
+                        android:textSize="12sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <ImageButton
+                            android:id="@+id/btnZoomMinusRear"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/zoom_decrease"
+                            android:src="@android:drawable/ic_media_previous"
+                            android:tint="@color/color_text_primary" />
+
+                        <SeekBar
+                            android:id="@+id/zoomSeekBarRear"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:layout_marginEnd="4dp"
+                            android:layout_weight="1"
+                            android:max="100"
+                            android:progress="0"
+                            android:progressDrawable="@drawable/bg_zoom_seekbar"
+                            android:thumb="@drawable/thumb_zoom_seekbar" />
+
+                        <ImageButton
+                            android:id="@+id/btnZoomPlusRear"
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="@string/zoom_increase"
+                            android:src="@android:drawable/ic_media_next"
+                            android:tint="@color/color_text_primary" />
+                    </LinearLayout>
+                </LinearLayout>
+            </LinearLayout>
+
             <!-- ===== Recording Button ===== -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/recordButton"
@@ -1112,6 +1238,55 @@
                         android:orientation="vertical"
                         android:paddingEnd="6dp">
 
+                        <!-- Zoom slider (front, fullscreen) — see the main-activity
+                             zoom row for the rationale. Uses the white-tinted
+                             drawables because the overlay always sits on top of
+                             the dark preview surface. -->
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:padding="2dp"
+                            android:text="@string/zoom_label"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <ImageButton
+                                android:id="@+id/btnZoomMinusFullscreenFront"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/zoom_decrease"
+                                android:src="@android:drawable/ic_media_previous"
+                                android:tint="#FFFFFF" />
+
+                            <SeekBar
+                                android:id="@+id/zoomSeekBarFullscreenFront"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="4dp"
+                                android:layout_marginEnd="4dp"
+                                android:layout_weight="1"
+                                android:max="100"
+                                android:progress="0"
+                                android:progressDrawable="@drawable/bg_zoom_seekbar_white"
+                                android:thumb="@drawable/thumb_zoom_seekbar_white" />
+
+                            <ImageButton
+                                android:id="@+id/btnZoomPlusFullscreenFront"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/zoom_increase"
+                                android:src="@android:drawable/ic_media_next"
+                                android:tint="#FFFFFF" />
+                        </LinearLayout>
+
                         <CheckBox
                             android:id="@+id/manualFocusCheckboxFullscreenFront"
                             android:layout_width="match_parent"
@@ -1233,6 +1408,52 @@
                         android:layout_weight="1"
                         android:orientation="vertical"
                         android:paddingStart="6dp">
+
+                        <!-- Zoom slider (rear, fullscreen) — see the front column. -->
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:padding="2dp"
+                            android:text="@string/zoom_label"
+                            android:textColor="#FFFFFF"
+                            android:textSize="11sp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <ImageButton
+                                android:id="@+id/btnZoomMinusFullscreenRear"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/zoom_decrease"
+                                android:src="@android:drawable/ic_media_previous"
+                                android:tint="#FFFFFF" />
+
+                            <SeekBar
+                                android:id="@+id/zoomSeekBarFullscreenRear"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="4dp"
+                                android:layout_marginEnd="4dp"
+                                android:layout_weight="1"
+                                android:max="100"
+                                android:progress="0"
+                                android:progressDrawable="@drawable/bg_zoom_seekbar_white"
+                                android:thumb="@drawable/thumb_zoom_seekbar_white" />
+
+                            <ImageButton
+                                android:id="@+id/btnZoomPlusFullscreenRear"
+                                android:layout_width="28dp"
+                                android:layout_height="28dp"
+                                android:background="?attr/selectableItemBackgroundBorderless"
+                                android:contentDescription="@string/zoom_increase"
+                                android:src="@android:drawable/ic_media_next"
+                                android:tint="#FFFFFF" />
+                        </LinearLayout>
 
                         <CheckBox
                             android:id="@+id/manualFocusCheckboxFullscreenRear"

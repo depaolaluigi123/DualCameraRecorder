@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Filled portion of the zoom slider (left of the thumb).
+     Uses the theme primary colour so the slider is consistent with the rest of
+     the app: green in Light, lavender in Dark. The reference (AndroidCamera) just
+     uses the default Material seekbar; this project wants a custom look that
+     matches the existing colour palette, so we paint the progress directly. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="3dp" />
+    <solid android:color="?attr/colorPrimary" />
+</shape>
