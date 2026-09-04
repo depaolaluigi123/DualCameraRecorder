@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Dual camera recorder using Camera2 + MediaRecorder.
  *
  * Records front + rear cameras simultaneously into two separate files
- * (front.mp4, rear.mp4) inside DCIM/DualCameraRecording/<timestamp>/.
+ * (front.mp4, rear.mp4) inside Movies/DualCameraRecording/<timestamp>/.
  *
  * Recording start order (the previous bug): the MediaRecorders MUST be prepared
  * and their surfaces added to the capture session BEFORE the recorders are
@@ -436,8 +436,9 @@ class DualCameraRecorder {
         }
 
         val timestamp = SimpleDateFormat("yyyy_MM_dd_HH_mm_ss", Locale.US).format(Date())
-        val dcimRoot = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DCIM)
-        outputDir = File(dcimRoot, "DualCameraRecording/$timestamp")
+        // Recordings land under Movies/DualCameraRecording/<timestamp>/
+        val moviesRoot = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+        outputDir = File(moviesRoot, "DualCameraRecording/$timestamp")
         outputDir?.mkdirs()
 
         frontOutputFile = File(outputDir, "front.mp4")
@@ -453,8 +454,14 @@ class DualCameraRecorder {
 
         try {
             // 1-2. Prepare recorders. prepare() is called inside createMediaRecorder().
-            frontMediaRecorder = createMediaRecorder(frontConfigOriented, frontOutputFile!!, audioBitrateKbps, audioSampleRateHz)
-            rearMediaRecorder = createMediaRecorder(rearConfigOriented, rearOutputFile!!, audioBitrateKbps, audioSampleRateHz)
+            // `isFront` is forwarded so the orientation hint can compensate for the
+            // front-facing sensor being mounted upside-down relative to the rear sensor
+            // (see createMediaRecorder). Without this the recorded front-camera video
+            // plays back rotated 180°. The preview is unaffected — the orientationHint
+            // is MP4 playback metadata only, while preview rotation is driven by the
+            // CaptureRequest's JPEG_ORIENTATION + the SurfaceTexture transform matrix.
+            frontMediaRecorder = createMediaRecorder(frontConfigOriented, frontOutputFile!!, audioBitrateKbps, audioSampleRateHz, isFront = true)
+            rearMediaRecorder = createMediaRecorder(rearConfigOriented, rearOutputFile!!, audioBitrateKbps, audioSampleRateHz, isFront = false)
 
             frontRecordSurface = frontMediaRecorder?.surface
             rearRecordSurface = rearMediaRecorder?.surface
@@ -617,7 +624,13 @@ class DualCameraRecorder {
      * Create and prepare a MediaRecorder for a config + output file.
      * prepare() is called here; start() is deferred to after the capture session is configured.
      */
-    private fun createMediaRecorder(config: StreamConfig, outputFile: File, audioBitrateKbps: Int, audioSampleRateHz: Int): MediaRecorder {
+    private fun createMediaRecorder(
+        config: StreamConfig,
+        outputFile: File,
+        audioBitrateKbps: Int,
+        audioSampleRateHz: Int,
+        isFront: Boolean
+    ): MediaRecorder {
         val mr = MediaRecorder()
         mr.setAudioSource(MediaRecorder.AudioSource.MIC)
         mr.setVideoSource(MediaRecorder.VideoSource.SURFACE)
@@ -638,18 +651,40 @@ class DualCameraRecorder {
         // --- Video settings (from the per-camera StreamConfig) ---
         val resolution = config.resolution
         val orientation = config.streamOrientation
-        val videoW = resolution.widthFor(orientation)
-        val videoH = resolution.heightFor(orientation)
-        mr.setVideoSize(videoW, videoH)
+        // Always encode in the camera sensor's native (landscape) orientation so the
+        // encoder never has to rotate frames. The orientationHint tells the player to
+        // rotate for portrait playback — landscape playback is unrotated. Using
+        // landscape dimensions for the encoder in BOTH orientations was the fix for the
+        // "Landscape-mode UI but portrait-recorded video" bug: the previous code wrote
+        // 1280x960 in landscape mode AND set orientationHint=90, so the player rotated
+        // the wide frame by 90° and played it back as 960x1280 (vertical). Now the
+        // landscape frame is written as-is and the hint is 0, so it plays back as
+        // 1280x960 (horizontal). Portrait recordings still get hint=90 and play back
+        // as 960x1280.
+        mr.setVideoSize(resolution.landscapeWidth, resolution.landscapeHeight)
         val bitrate = if (config.bitrate.bps > 0) config.bitrate.bps else 8_000_000
         mr.setVideoEncodingBitRate(bitrate)
         mr.setVideoFrameRate(config.fps.value)
 
-        val orientationHint = if (orientation.isLandscape) 90 else 0
+        // The base hint rotates the encoded frame to match the requested display
+        // orientation: 0 in landscape (frame is already wide), 90 in portrait (player
+        // rotates 90° CCW to display tall).
+        val baseHint = if (orientation.isLandscape) 0 else 90
+        // Front-facing sensors are physically mounted upside-down relative to the rear
+        // sensor (typical sensor orientation 270° vs 90°), so the encoded frame from
+        // the front camera is rotated 180° compared to the rear-camera frame. We add
+        // 180° to the hint for the front camera so the player rotates the recorded
+        // front-camera video to the correct upright orientation. This is metadata only
+        // — it does NOT affect the live preview, which is driven by the HAL via
+        // JPEG_ORIENTATION on the CaptureRequest plus the SurfaceTexture transform
+        // matrix in MainActivity.applyPreviewTransform. Modulo 360 keeps the hint in
+        // the documented supported range {0, 90, 180, 270}.
+        val orientationHint = if (isFront) (baseHint + 180) % 360 else baseHint
         mr.setOrientationHint(orientationHint)
 
         Log.d(TAG, "createMediaRecorder: file=${outputFile.name} " +
-            "resolution=${videoW}x$videoH (orientation=$orientation) " +
+            "resolution=${resolution.landscapeWidth}x${resolution.landscapeHeight} " +
+            "(display orientation=$orientation, isFront=$isFront, hint=${orientationHint}°) " +
             "fps=${config.fps.value} videoBitrate=$bitrate bps " +
             "audioBitrate=${audioBitrateKbps} kbps audioSampleRate=$audioSampleRateHz Hz")
 

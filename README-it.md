@@ -10,7 +10,7 @@ L'app è costruita attorno all'**API Camera2** e a **`MediaRecorder`** e gira co
 
 ### Registrazione simultanea da due fotocamere
 - Anteprima live di entrambe le fotocamere affiancate (verticale) o sovrapposte (orizzontale).
-- Premendo **Registra** partono due sessioni `MediaRecorder` in sincrono, ognuna delle quali scrive il proprio file MP4 in `DCIM/DualCameraRecording/<timestamp>/`.
+- Premendo **Registra** partono due sessioni `MediaRecorder` in sincrono, ognuna delle quali scrive il proprio file MP4 in `Movies/DualCameraRecording/<timestamp>/`.
 - Le fotocamere vengono scelte tra i `concurrentCameraIds` dichiarati dal dispositivo, per garantire che la coppia possa effettivamente funzionare insieme. Se la combinazione richiesta non è supportata, l'app passa automaticamente a una coppia compatibile e avvisa l'utente.
 - Tap-to-focus disponibile su ogni superficie di anteprima.
 
@@ -52,10 +52,10 @@ Ogni fotocamera può essere configurata in modo indipendente:
 
 ## Output
 
-Ogni registrazione crea una cartella nella directory `DCIM/DualCameraRecording/` del dispositivo:
+Ogni registrazione crea una cartella nella directory `Movies/DualCameraRecording/` del dispositivo:
 
 ```
-DCIM/DualCameraRecording/
+Movies/DualCameraRecording/
   2025-09-01_14-22-08/
     front.mp4
     rear.mp4

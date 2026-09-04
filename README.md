@@ -10,7 +10,7 @@ The app is built around the **Camera2 API** and **`MediaRecorder`** and runs as 
 
 ### Simultaneous dual-camera recording
 - Live preview of both cameras side-by-side (portrait) or stacked (landscape).
-- Pressing **Record** starts two `MediaRecorder` sessions in lock-step, each writing to its own MP4 file inside `DCIM/DualCameraRecording/<timestamp>/`.
+- Pressing **Record** starts two `MediaRecorder` sessions in lock-step, each writing to its own MP4 file inside `Movies/DualCameraRecording/<timestamp>/`.
 - The cameras are picked from the device's reported `concurrentCameraIds` so the pair is guaranteed to run together. If the desired combination is not supported, the app automatically falls back to a working pair and notifies the user.
 - Tap-to-focus is available on every preview surface.
 
@@ -52,10 +52,10 @@ Each camera can be configured independently:
 
 ## Output
 
-Each recording creates a folder inside the device's `DCIM/DualCameraRecording/` directory:
+Each recording creates a folder inside the device's `Movies/DualCameraRecording/` directory:
 
 ```
-DCIM/DualCameraRecording/
+Movies/DualCameraRecording/
   2025-09-01_14-22-08/
     front.mp4
     rear.mp4

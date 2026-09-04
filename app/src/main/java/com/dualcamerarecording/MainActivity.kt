@@ -140,7 +140,7 @@ class MainActivity : AppCompatActivity() {
     // once on construction from the manifest + API level so we request exactly
     // what the OS expects:
     //  - CAMERA + RECORD_AUDIO: always required (preview + audio capture)
-    //  - WRITE_EXTERNAL_STORAGE: required to save MP4 files to the public DCIM
+    //  - WRITE_EXTERNAL_STORAGE: required to save MP4 files to the public Movies
     //    directory. On API 29+ this still works thanks to the manifest flag
     //    `requestLegacyExternalStorage="true"`; the permission remains a normal
     //    runtime permission on every API level we support (minSdk = 26).
@@ -198,6 +198,16 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.permission_storage_required, Toast.LENGTH_LONG).show()
             }
             initializeCameraSystems()
+            // The SurfaceTexture listeners attached in initListeners() fired
+            // during the first layout pass BEFORE the user granted the permission,
+            // so they returned early via the hasRequiredPermissions() guard inside
+            // startCamerasIfReady(). Now that permissions are granted, kick off
+            // the main-view cameras explicitly. Without this the main-view
+            // previews would stay black until the user entered and exited the
+            // fullscreen overlay (which calls startFullscreenCamerasIfReady /
+            // startCamerasIfReady directly via the fullscreen SurfaceTexture
+            // listeners and exitFullscreen).
+            startCamerasIfReady()
             // Also start live mic capture now that permission is granted.
             app.ensureMicCaptureStarted()
         } else {
@@ -240,28 +250,31 @@ class MainActivity : AppCompatActivity() {
         // (vertical). The user has to enable Landscape on each launch via the checkbox.
         isLandscapeMode = false
 
-        // Check + request runtime permissions BEFORE inflating the views. The
-        // TextureView's SurfaceTexture becomes available during setContentView,
-        // which would otherwise call startCamerasIfReady() before we know
-        // whether CAMERA has been granted. Asking up-front lets the system
-        // permission dialog appear on a fresh launch and blocks the camera
-        // pipeline until the user grants the permission (or denies it, in
-        // which case the SurfaceTexture listener no-ops via the permission
-        // guard inside startCamerasIfReady()).
-        checkPermissionsAndInit()
-
-        // Start live microphone capture for real-time audio meters (even without
-        // recording). The microphone is part of the permission list requested
-        // by [checkPermissionsAndInit] below — once CAMERA + RECORD_AUDIO +
-        // storage are granted, that callback also calls
-        // [DualCameraRecorderApp.ensureMicCaptureStarted]. No separate mic-only
-        // request is needed here.
-
+        // Inflate the views and attach the SurfaceTexture listeners BEFORE
+        // asking for permissions. The listeners attached in [initListeners]
+        // fire on the first layout pass and call startCamerasIfReady(); if
+        // the user hasn't granted CAMERA yet the listener returns early via
+        // the hasRequiredPermissions() guard, and the permissionLauncher
+        // callback explicitly calls startCamerasIfReady() once the permission
+        // is granted (otherwise the main-view previews would stay black until
+        // the user entered and exited the fullscreen overlay — see the
+        // permission callback for the full explanation).
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
         initListeners()
         observeSettings()
+
+        // Request runtime permissions and initialize the camera systems. The
+        // TextureView SurfaceTexture listeners (attached in initListeners) fire
+        // during the first layout pass and call startCamerasIfReady(); if the
+        // user hasn't granted CAMERA yet the listener returns early, so we
+        // also need to start the cameras explicitly once the permission
+        // callback fires. checkPermissionsAndInit handles both the already-
+        // granted path (calls startCamerasIfReady via a global-layout listener)
+        // and the denied-then-granted path (calls startCamerasIfReady from the
+        // permissionLauncher callback).
+        checkPermissionsAndInit()
 
         // Show the device-compatibility alert ONLY on a fresh app launch
         // (savedInstanceState is null), not on every Activity recreate. The
@@ -1653,10 +1666,19 @@ class MainActivity : AppCompatActivity() {
             // the buffers to the picked size for the new cameras.
             resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = false, surface = frontSt)
             resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = false, surface = rearSt)
-            // closePreview() waits up to 500ms for the previous retry thread to die, but
-            // the camerasStarting guard above prevents re-entrant calls in the first place
-            // so this should normally be a fast path.
-            dualCameraRecorder.closePreview()
+            // Stop the current preview AND yield briefly so the camera HAL has a moment
+            // to start releasing the old devices before we ask it to open a new one.
+            // closePreview() interrupts the previous preview thread and joins for 50 ms,
+            // but CameraManager.openCamera() is a blocking call that does not always
+            // honour the interrupt, so the join can time out while the HAL still has
+            // the previous camera "in use". A short 10 ms yield before setupPreview()
+            // is enough to let the HAL release the previous devices; without it the
+            // new openCamera() on a consecutive camera switch returns
+            // ERROR_CAMERA_IN_USE and the previews freeze black until the next
+            // surface-availability event (e.g. entering fullscreen, which itself
+            // goes through stopCurrentPreviewAndWait). Mirrors the pattern in
+            // enterFullscreen / exitFullscreen.
+            stopCurrentPreviewAndWait()
             dualCameraRecorder.setupPreview(
                 frontCameraId = frontCamId,
                 rearCameraId = rearCamId,
@@ -1736,7 +1758,10 @@ class MainActivity : AppCompatActivity() {
             // for the wrong camera/orientation shows a black square.
             resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = true, surface = frontSt)
             resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = true, surface = rearSt)
-            dualCameraRecorder.closePreview()
+            // Yield briefly so the camera HAL has a moment to start releasing the
+            // old devices before we ask it to open a new one. Mirrors the
+            // startCamerasIfReady / enterFullscreen / exitFullscreen pattern.
+            stopCurrentPreviewAndWait()
             dualCameraRecorder.setupPreview(
                 frontCameraId = frontCamId,
                 rearCameraId = rearCamId,
@@ -1844,8 +1869,17 @@ class MainActivity : AppCompatActivity() {
         // for the actual pair via onBeforeOpenFallback.
         resizeBufferToPickedSizeForPair(cfg.frontCameraId, isFront = true, isFullscreen = isFullscreen, surface = frontSt)
         resizeBufferToPickedSizeForPair(cfg.rearCameraId, isFront = false, isFullscreen = isFullscreen, surface = rearSt)
-        // Close existing preview first, then set up new one to avoid race condition
-        dualCameraRecorder.closePreview()
+        // Close the existing preview AND yield briefly so the camera HAL has a moment
+        // to start releasing the old devices before we ask it to open a new one.
+        // Without the yield, a rapid second camera change (e.g. switching rear from
+        // Y to Z then back to Y) races the HAL: closePreview()'s 50 ms join on the
+        // previous preview thread can time out while CameraManager.openCamera() is
+        // still pending, and the new openCamera() then returns ERROR_CAMERA_IN_USE
+        // — both previews stay black until the next surface-availability event
+        // (e.g. entering fullscreen, which itself goes through
+        // stopCurrentPreviewAndWait). Mirrors the pattern used by
+        // enterFullscreen / exitFullscreen.
+        stopCurrentPreviewAndWait()
         dualCameraRecorder.setupPreview(
             frontCameraId = cfg.frontCameraId,
             rearCameraId = cfg.rearCameraId,
