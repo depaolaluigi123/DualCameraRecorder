@@ -120,6 +120,36 @@
                 android:textSize="16sp"
                 android:textStyle="bold" />
 
+            <!-- "Restore Cameras" button: forces both previews to stop and restart,
+                 which re-runs the dual-surface capture session handshake. Useful when
+                 one or both previews stall (e.g. after a HAL glitch on first open or
+                 a fast camera swap that the retry path didn't fully recover from).
+                 Disabled while a recording is in progress to avoid tearing down the
+                 MediaRecorder's session. -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRestoreCameras"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="0dp"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="6dp"
+                android:text="@string/restore_cameras"
+                android:textSize="12sp" />
+
+            <!-- Hint under the Restore Cameras button: describes what the button
+                 does and reminds the user it is disabled while recording. Same
+                 styling as cameraPickerHint / meterHint for visual consistency. -->
+            <TextView
+                android:id="@+id/restoreCamerasHint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/restore_cameras_hint"
+                android:textColor="@color/color_text_secondary"
+                android:textSize="12sp" />
+
             <!-- Front camera selection -->
             <TextView
                 android:id="@+id/frontCameraLabel"
@@ -985,20 +1015,30 @@
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 
-    <!-- Fullscreen live preview overlay (hidden by default). The background is
-         @color/preview_background so it adapts to the selected theme — black in
-         Dark mode, white in Light mode (per user request). The TextureViews on
-         top still render the camera feed. -->
+    <!-- Fullscreen live preview overlay.
+         The visibility is INVISIBLE (not GONE) on purpose: the TextureViews inside
+         this overlay need to be laid out so their SurfaceTextures are created
+         before the cameras start. With GONE, the views are not laid out and the
+         SurfaceTextures only come into existence when the overlay is made
+         visible — that is too late to add them to the camera capture session
+         without a brief reconfiguration. INVISIBLE keeps the views laid out and
+         the SurfaceTextures alive, while clickable=false / focusable=false lets
+         touches pass through to the main preview underneath. The activity flips
+         these flags to true at the same time it flips visibility to VISIBLE on
+         fullscreen entry (and back to false / INVISIBLE on exit), so the overlay
+         behaves as a true fullscreen takeover only when the user is in
+         fullscreen. The background is @color/preview_background so it adapts to
+         the selected theme — black in Dark mode, white in Light mode. -->
     <FrameLayout
         android:id="@+id/fullscreenPreviewOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="@color/preview_background"
-        android:clickable="true"
+        android:clickable="false"
         android:elevation="24dp"
-        android:focusable="true"
-        android:visibility="gone"
-        tools:visibility="gone">
+        android:focusable="false"
+        android:visibility="invisible"
+        tools:visibility="invisible">
 
         <!-- Horizontal LinearLayout: front left, rear right -->
         <LinearLayout
@@ -1219,8 +1259,8 @@
                         app:iconGravity="textStart"
                         app:iconPadding="0dp"
                         app:iconSize="24dp"
-                        app:iconTint="#FFFFFF"
-                        app:strokeColor="#FFFFFF" />
+                        app:iconTint="?attr/colorPrimary"
+                        app:strokeColor="?attr/colorPrimary" />
                 </LinearLayout>
 
                 <!-- Two-column manual controls: front (left), rear (right) -->

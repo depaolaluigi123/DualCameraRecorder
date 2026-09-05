@@ -91,11 +91,14 @@
     <string name="toggle_controls">Mostra/nascondi controlli</string>
     <string name="show_controls">Mostra controlli</string>
     <string name="hide_controls">Nascondi controlli</string>
+    <!-- Bottone sopra gli spinner di selezione telecamera che ferma entrambe le
+         anteprime e le riavvia. Utile quando una o entrambe le anteprime si
+         bloccano. Disabilitato durante una registrazione. -->
+    <string name="restore_cameras">Ripristina telecamere</string>
+    <!-- Suggerimento mostrato sotto il bottone Ripristina telecamere: descrive
+         cosa fa il bottone e ricorda che è disattivato durante la registrazione. -->
+    <string name="restore_cameras_hint">Chiude e riapre entrambe le telecamere. Disattivato durante la registrazione.</string>
     <string name="fallback_pair">Passato a %1$s per compatibilità doppia camera</string>
-    <string name="camera_not_working_front">La telecamera frontale non funziona. Si consiglia di cambiarla tramite il selettore Telecamera frontale.</string>
-    <string name="camera_not_working_rear">La telecamera posteriore non funziona. Si consiglia di cambiarla tramite il selettore Telecamera posteriore.</string>
-    <string name="camera_not_working_both">Nessuna delle telecamere funziona. Si consiglia di cambiarle tramite i selettori.</string>
-    <string name="camera_not_working_error">Errore telecamera. Si consiglia di cambiare le telecamere tramite i selettori.</string>
 
     <!-- Appearance -->
     <string name="theme_label">Tema</string>

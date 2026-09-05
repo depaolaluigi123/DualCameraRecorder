@@ -87,15 +87,18 @@
     <!-- Fullscreen -->
     <string name="fullscreen_preview">Fullscreen Preview</string>
     <string name="exit_fullscreen">Back</string>
+    <!-- Button above the camera selection spinners that stops both previews and
+         restarts them. Useful when one or both previews stall. Disabled while
+         a recording is in progress. -->
+    <string name="restore_cameras">Restore Cameras</string>
+    <!-- Hint shown under the Restore Cameras button: describes what the button
+         does and reminds the user it is disabled while recording. -->
+    <string name="restore_cameras_hint">Closes and reopens both cameras. Disabled while recording.</string>
     <string name="tap_to_focus">Tap to focus</string>
     <string name="toggle_controls">Toggle controls</string>
     <string name="show_controls">Show controls</string>
     <string name="hide_controls">Hide controls</string>
     <string name="fallback_pair">Switched to %1$s for dual-camera compatibility</string>
-    <string name="camera_not_working_front">Front camera is not working. Please change the camera in the Front Camera selector.</string>
-    <string name="camera_not_working_rear">Rear camera is not working. Please change the camera in the Rear Camera selector.</string>
-    <string name="camera_not_working_both">Neither camera is working. Please change one or both cameras in the selectors.</string>
-    <string name="camera_not_working_error">Camera error. Please try changing the cameras in the selectors.</string>
 
     <!-- Appearance -->
     <string name="theme_label">Theme</string>

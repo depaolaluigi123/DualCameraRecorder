@@ -30,15 +30,42 @@ import kotlin.math.abs
 class CameraController(
     val cameraId: String,
     private val cameraManager: CameraManager,
-    private val previewSurface: Surface?,
+    previewSurface: Surface?,
     private val recordSurface: Surface?,
     private val imageReaderSurface: Surface?,
     private val handler: Handler = Handler(Looper.getMainLooper()),
     /** Target landscape preview size (from StreamResolution) to match; null = pick best 4:3. */
     private val targetSize: Size? = null,
     /** Facing for convenience. */
-    val facing: Int = android.hardware.camera2.CameraMetadata.LENS_FACING_BACK
+    val facing: Int = android.hardware.camera2.CameraMetadata.LENS_FACING_BACK,
+    /**
+     * Optional second preview surface (e.g. the fullscreen preview TextureView's
+     * SurfaceTexture, wrapped in a Surface). When non-null, this surface is added
+     * to the capture session AND to every capture request alongside the main
+     * [previewSurface]. The camera writes the same frames to both surfaces
+     * continuously, so the host activity can decide at the view level which one
+     * is visible (toggle fullscreen = just flip TextureView visibility — no
+     * capture-session reconfiguration, no MediaRecorder frame drop, no freeze in
+     * the recorded video).
+     */
+    previewSurfaceSecondary: Surface? = null
 ) {
+    /**
+     * The current preview surface. Mutable so it can be swapped at runtime (e.g. on a
+     * main<->fullscreen transition during recording — see [swapPreviewSurface]). All
+     * capture requests and capture-session reconfigurations read this field, so an
+     * update here is picked up by the next [createCaptureSession] / [startPreview] call.
+     */
+    private var previewSurface: Surface? = previewSurface
+    /**
+     * Optional secondary preview surface (see constructor). Written into the
+     * capture session AND every capture request so the camera renders into both
+     * surfaces simultaneously. The caller is expected to have set this once at
+     * construction time and not swap it — unlike [previewSurface] there is no
+     * in-place hot-swap path because the whole point of the dual-surface setup
+     * is that the camera never needs to be reconfigured.
+     */
+    private val previewSurfaceSecondary: Surface? = previewSurfaceSecondary
     /** The preview size the camera actually uses; set after openCamera, read by the
      *  TextureView owner to set SurfaceTexture default buffer size + transform. */
     @Volatile
@@ -248,6 +275,12 @@ class CameraController(
 
         val surfaces = mutableListOf<Surface>()
         previewSurface?.let { surfaces.add(it) }
+        // The secondary preview surface (e.g. the fullscreen preview) is part
+        // of the same capture session so the camera writes the same frames to
+        // both previews continuously. Switching which one the user sees is a
+        // pure TextureView visibility toggle — no session reconfiguration, no
+        // MediaRecorder frame drop.
+        previewSurfaceSecondary?.let { surfaces.add(it) }
         recordSurface?.let { surfaces.add(it) }
         imageReaderSurface?.let { surfaces.add(it) }
 
@@ -273,12 +306,60 @@ class CameraController(
         }
     }
 
+    /**
+     * Swap the preview surface in the active capture session WITHOUT closing the camera.
+     *
+     * The camera device stays open across the swap — only the capture session is torn
+     * down and re-created with the new preview surface (the [recordSurface] is preserved
+     * so the active `MediaRecorder` keeps receiving frames throughout). This is the
+     * "smooth" path for a main<->fullscreen transition while recording: it avoids the
+     * 1-2 second gap that the close+reopen path leaves in the recorded video (the HAL
+     * has to re-initialize the camera on reopen, which is what the `MediaRecorder` would
+     * otherwise freeze on).
+     *
+     * Safe to call from any thread — the work is posted to the camera [handler].
+     *
+     * - If the camera is not yet open, the new surface is stored and will be picked up
+     *   by the first [createCaptureSession] call (i.e. the `onOpened` callback). The
+     *   existing [previewSurface] field is replaced atomically.
+     * - If the camera is open, the existing capture session is closed (the camera
+     *   device is left alone) and a fresh capture session is created with the new
+     *   surface. The next time [startPreview] runs (from the session's `onConfigured`
+     *   callback) it targets the new surface.
+     * - The internal [previewRequest] is cleared so the next [startPreview] rebuilds it
+     *   against the new surface — the old builder would still reference the old
+     *   preview surface and the camera would write to a Surface nobody is reading from.
+     */
+    fun swapPreviewSurface(newSurface: Surface) {
+        handler.post {
+            val device = cameraDevice
+            if (device == null) {
+                Log.d(TAG, "swapPreviewSurface: camera not yet open, just storing the new surface")
+                this.previewSurface = newSurface
+                return@post
+            }
+            Log.d(TAG, "swapPreviewSurface: re-creating capture session with new preview surface (camera stays open)")
+            this.previewSurface = newSurface
+            // Drop the old request so startPreview() rebuilds it against the new
+            // surface — the old builder still references the old preview surface
+            // and would silently write to a Surface nobody is reading from.
+            previewRequest = null
+            try { captureSession?.close() } catch (e: Exception) {
+                Log.w(TAG, "swapPreviewSurface: error closing old session: ${e.message}")
+            }
+            captureSession = null
+            createCaptureSession()
+        }
+    }
+
     @WorkerThread
     fun startPreview() {
         val session = captureSession ?: return
         try {
-            // Target the record surface too when present so frames flow to the
-            // MediaRecorder while recording. (A no-op when recordSurface is null.)
+            // Target both preview surfaces (main + fullscreen) and the record
+            // surface so frames flow to all of them. (previewSurfaceSecondary is
+            // a no-op when the dual-surface setup isn't in use; recordSurface is
+            // a no-op outside of recording.)
             val sensorOrientation = try {
                 cameraManager.getCameraCharacteristics(cameraId)
                     .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
@@ -286,6 +367,7 @@ class CameraController(
             val jpegOrientation = (sensorOrientation - targetRotation * 90 + 360) % 360
             val builder = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
             }
@@ -378,6 +460,7 @@ class CameraController(
             val jpegOrientation = (sensorOrientation - rotation * 90 + 360) % 360
             val builder = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
             }
@@ -413,6 +496,7 @@ class CameraController(
         try {
             val builder = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
             }
             session.setRepeatingRequest(builder.build(), null, handler)
@@ -482,14 +566,28 @@ class CameraController(
             //    setRepeatingRequest (rather than a one-shot capture) keeps the
             //    preview stream alive — the camera continues producing frames
             //    while it processes the AF cancel.
-            val cancelBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            //
+            //    IMPORTANT: build the request via createCaptureRequest() (the shared
+            //    helper) rather than device.createCaptureRequest() directly. The
+            //    helper re-applies SCALER_CROP_REGION from currentCrop on every
+            //    call, which is what preserves the user's zoom level. Calling
+            //    device.createCaptureRequest() directly omits the crop region and
+            //    the camera reverts to 1.0x for the entire AF cycle — the user sees
+            //    the preview snap back to no-zoom the moment they tap to focus.
+            val cancelBuilder = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                // Override the helper's defaults for the AF cycle: the cancel
+                // frame wants CONTINUOUS_VIDEO + CANCEL (helper sets these
+                // automatically when manualFocusEnabled is false, so the
+                // CONTROL_AF_MODE line below is technically redundant for the
+                // common case, but kept for clarity and as a safety net if
+                // manualFocusEnabled is ever flipped while a tap is in flight).
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_CANCEL)
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                applyFlashToBuilder(this)
             }
             val cancelCallback = object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
@@ -517,17 +615,17 @@ class CameraController(
         jpegOrientation: Int
     ) {
         try {
-            val startBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                previewSurface?.let { addTarget(it) }
-                recordSurface?.let { addTarget(it) }
-                set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
-                set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
-                set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
-                applyFlashToBuilder(this)
-            }
+            // The poll callback re-applies the AF-start request on every capture
+            // result while the lens is still scanning. We build a FRESH request on
+            // every poll iteration (rather than caching the builder) so the user's
+            // most recent zoom (currentCrop), manual focus / exposure, and flash
+            // state are honored. Without this, a zoom-slider change that lands
+            // between two poll iterations would be immediately overwritten by a
+            // stale AF request still carrying the old SCALER_CROP_REGION — the
+            // user sees the preview snap back to 1.0× and oscillate as their
+            // slider drag and the AF poll race each other to set the repeating
+            // request. (Happens on the rear camera of some devices where the AF
+            // cycle is long enough for a slider drag to complete several polls.)
             val pollCallback = object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(
                     s: CameraCaptureSession,
@@ -538,10 +636,15 @@ class CameraController(
                     if (afState == null ||
                         afState == CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN ||
                         afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN) {
-                        // AF still scanning — re-apply the same repeating request
-                        // so we keep getting capture results until the lens settles.
+                        // AF still scanning — re-apply the AF-start request, but
+                        // build it fresh so the latest zoom/manual/flash state
+                        // is captured (see the long comment above).
                         try {
-                            session.setRepeatingRequest(startBuilder.build(), this, handler)
+                            session.setRepeatingRequest(
+                                buildAfStartRequest(device, region, jpegOrientation),
+                                this,
+                                handler
+                            )
                         } catch (e: Exception) {
                             Log.e(TAG, "triggerStartRepeating poll failed: ${e.message}")
                             resumeContinuousAf(session, device, jpegOrientation)
@@ -551,10 +654,49 @@ class CameraController(
                     }
                 }
             }
-            session.setRepeatingRequest(startBuilder.build(), pollCallback, handler)
+            session.setRepeatingRequest(
+                buildAfStartRequest(device, region, jpegOrientation),
+                pollCallback,
+                handler
+            )
         } catch (e: Exception) {
             Log.e(TAG, "triggerStartRepeating failed: ${e.message}")
         }
+    }
+
+    /**
+     * Build a single AF-start capture request for the given metering region.
+     *
+     * Called fresh on every poll iteration (NOT cached as a builder field) so the
+     * AF cycle always re-reads the current zoom ([currentCrop]), manual focus /
+     * exposure, and flash state. See [triggerStartRepeating] for the full
+     * explanation of the race condition this prevents when the user adjusts the
+     * zoom slider during an in-flight tap-to-focus cycle.
+     *
+     * The builder is built via the shared [createCaptureRequest] helper, which
+     * already wires up the AF / AE / SCALER_CROP_REGION / flash defaults; this
+     * function only overrides the AF / AE mode + region + trigger for the AF
+     * cycle and adds the preview (and optional record) target surfaces.
+     */
+    private fun buildAfStartRequest(
+        device: CameraDevice,
+        region: android.hardware.camera2.params.MeteringRectangle,
+        jpegOrientation: Int
+    ): CaptureRequest {
+        return createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            previewSurface?.let { addTarget(it) }
+            previewSurfaceSecondary?.let { addTarget(it) }
+            recordSurface?.let { addTarget(it) }
+            set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+            // AF cycle wants AUTO + START on a specific region; override the
+            // helper's CONTINUOUS_VIDEO default. AE stays ON but is constrained
+            // to the same region as AF (tap-to-focus is a joint AF/AE operation).
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(region))
+            set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            set(CaptureRequest.CONTROL_AE_REGIONS, arrayOf(region))
+        }.build()
     }
 
     private fun resumeContinuousAf(
@@ -563,14 +705,23 @@ class CameraController(
         jpegOrientation: Int
     ) {
         try {
-            val resume = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            // Build the resume request via the shared createCaptureRequest() helper
+            // so the user's current digital zoom is preserved. The previous
+            // implementation called device.createCaptureRequest() directly, which
+            // dropped SCALER_CROP_REGION and snapped zoom back to 1.0x for the
+            // rest of the AF cycle's lifetime.
+            val resume = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                // Override the helper's defaults to restore continuous AF in IDLE
+                // state. (Helper sets CONTINUOUS_VIDEO already when manual focus is
+                // off, but we also need AF_TRIGGER=IDLE to release the START
+                // latch the previous request fired.)
                 set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
                 set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE)
                 set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                applyFlashToBuilder(this)
             }
             // Restore the normal repeating preview stream. This is identical to
             // what [updatePreviewRequest] would have produced, so the camera does
@@ -592,6 +743,7 @@ class CameraController(
             val jpegOrientation = (sensorOrientation - targetRotation * 90 + 360) % 360
             val builder = createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 addTarget(previewSurf)
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
             }
@@ -726,6 +878,7 @@ class CameraController(
         runCatching {
             val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                 previewSurface?.let { addTarget(it) }
+                previewSurfaceSecondary?.let { addTarget(it) }
                 recordSurface?.let { addTarget(it) }
                 if (crop != null) {
                     set(CaptureRequest.SCALER_CROP_REGION, crop)

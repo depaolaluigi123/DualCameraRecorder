@@ -45,6 +45,18 @@ class DualCameraRecorder {
     private var rearSurfaceTexture: SurfaceTexture? = null
     private var frontPreviewSurface: Surface? = null
     private var rearPreviewSurface: Surface? = null
+    /**
+     * Secondary preview surfaces (e.g. the fullscreen preview TextureView's
+     * SurfaceTexture wrapped in a Surface). When non-null these are added to the
+     * capture session AND every capture request alongside the main
+     * [frontPreviewSurface] / [rearPreviewSurface], so the camera writes the
+     * same frames to both pairs of previews continuously. Toggling which one
+     * the user sees is then a pure TextureView visibility change — the camera
+     * never needs to be reconfigured, so the `MediaRecorder` never loses frames
+     * at the toggle.
+     */
+    private var frontPreviewSurfaceSecondary: Surface? = null
+    private var rearPreviewSurfaceSecondary: Surface? = null
     private var frontRecordSurface: Surface? = null
     private var rearRecordSurface: Surface? = null
 
@@ -116,7 +128,8 @@ class DualCameraRecorder {
             imageReaderSurface = null,
             handler = cameraHandler,
             targetSize = targetSizeFor(config.frontConfig),
-            facing = getCameraFacing(frontCameraId)
+            facing = getCameraFacing(frontCameraId),
+            previewSurfaceSecondary = frontPreviewSurfaceSecondary
         )
         rearController = CameraController(
             cameraId = rearCameraId,
@@ -126,12 +139,34 @@ class DualCameraRecorder {
             imageReaderSurface = null,
             handler = cameraHandler,
             targetSize = targetSizeFor(config.rearConfig),
-            facing = getCameraFacing(rearCameraId)
+            facing = getCameraFacing(rearCameraId),
+            previewSurfaceSecondary = rearPreviewSurfaceSecondary
         )
     }
 
     /**
      * Set up preview only (live preview before recording). Closes existing controllers.
+     *
+     * If a recording is currently in progress (see [isRecording] / [frontRecordSurface] /
+     * [rearRecordSurface]), the active `MediaRecorder` surfaces are kept in the new capture
+     * session alongside the new preview surfaces. Without this, a main<->fullscreen toggle
+     * while recording would tear down the recording cameras via [closePreview] and the
+     * follow-up `setupPreview` would build a preview-only capture session, leaving the
+     * `MediaRecorder` surfaces without any active session. Frames would stop flowing to
+     * the recorders and the resulting video would freeze at the exact moment of the
+     * preview-surface change (visible as a permanent freeze in both the front and rear
+     * output files, even though the live previews keep working on the new surfaces).
+     *
+     * The `MediaRecorder` `Surface` is independent of the Camera2 capture session and
+     * remains valid for the entire lifetime of the recorder, so it can be safely added to
+     * the freshly configured session on the new preview surface set.
+     *
+     * The optional [frontPreviewSurfaceSecondary] / [rearPreviewSurfaceSecondary] are the
+     * fullscreen preview surfaces. When provided, they're added to the capture session
+     * AND every capture request alongside the main preview surfaces, so the camera writes
+     * to both pairs of previews continuously. Toggling which pair the user sees is then
+     * a pure TextureView visibility change — the camera is never reconfigured, so
+     * toggling fullscreen during recording leaves the recorded video gap-free.
      */
     fun setupPreview(
         frontCameraId: String,
@@ -141,7 +176,14 @@ class DualCameraRecorder {
         frontSurfaceTexture: SurfaceTexture? = null,
         rearSurfaceTexture: SurfaceTexture? = null,
         frontTargetSize: Size? = null,
-        rearTargetSize: Size? = null
+        rearTargetSize: Size? = null,
+        /**
+         * Optional fullscreen preview surfaces. When non-null, the camera writes
+         * the same frames to these as to the main preview pair, so a fullscreen
+         * toggle later in the session requires no camera reconfiguration.
+         */
+        frontPreviewSurfaceSecondary: Surface? = null,
+        rearPreviewSurfaceSecondary: Surface? = null
     ) {
         frontController?.stopPreview()
         frontController?.closeCamera()
@@ -152,31 +194,41 @@ class DualCameraRecorder {
         this.rearPreviewSurface = rearPreviewSurface
         this.frontSurfaceTexture = frontSurfaceTexture
         this.rearSurfaceTexture = rearSurfaceTexture
+        this.frontPreviewSurfaceSecondary = frontPreviewSurfaceSecondary
+        this.rearPreviewSurfaceSecondary = rearPreviewSurfaceSecondary
 
         this.config = DualCameraConfig(
             frontCameraId = frontCameraId,
             rearCameraId = rearCameraId
         )
 
+        // Preserve the MediaRecorder surfaces in the new capture session when a
+        // recording is in progress. See the method KDoc above for the full
+        // explanation of why this is needed during a main<->fullscreen toggle.
+        val frontRecord = if (isRecording.get()) frontRecordSurface else null
+        val rearRecord = if (isRecording.get()) rearRecordSurface else null
+
         frontController = CameraController(
             cameraId = frontCameraId,
             cameraManager = cameraManager!!,
             previewSurface = frontPreviewSurface,
-            recordSurface = null,
+            recordSurface = frontRecord,
             imageReaderSurface = null,
             handler = cameraHandler,
             targetSize = frontTargetSize,
-            facing = getCameraFacing(frontCameraId)
+            facing = getCameraFacing(frontCameraId),
+            previewSurfaceSecondary = frontPreviewSurfaceSecondary
         )
         rearController = CameraController(
             cameraId = rearCameraId,
             cameraManager = cameraManager!!,
             previewSurface = rearPreviewSurface,
-            recordSurface = null,
+            recordSurface = rearRecord,
             imageReaderSurface = null,
             handler = cameraHandler,
             targetSize = rearTargetSize,
-            facing = getCameraFacing(rearCameraId)
+            facing = getCameraFacing(rearCameraId),
+            previewSurfaceSecondary = rearPreviewSurfaceSecondary
         )
     }
 
@@ -479,6 +531,10 @@ class DualCameraRecorder {
             rearController?.closeCamera()
 
             // 4. Recreate controllers with the recorder surfaces in the session.
+            // The secondary (fullscreen) preview surfaces are kept in the session
+            // too, so a fullscreen toggle during recording is a pure view-level
+            // change with no camera reconfiguration — the MediaRecorder sees a
+            // continuous frame stream and the output video has no gap.
             frontController = CameraController(
                 cameraId = frontCameraId,
                 cameraManager = cameraManager!!,
@@ -487,7 +543,8 @@ class DualCameraRecorder {
                 imageReaderSurface = null,
                 handler = cameraHandler,
                 targetSize = targetSizeFor(frontConfigOriented),
-                facing = getCameraFacing(frontCameraId)
+                facing = getCameraFacing(frontCameraId),
+                previewSurfaceSecondary = frontPreviewSurfaceSecondary
             )
             rearController = CameraController(
                 cameraId = rearCameraId,
@@ -497,7 +554,8 @@ class DualCameraRecorder {
                 imageReaderSurface = null,
                 handler = cameraHandler,
                 targetSize = targetSizeFor(rearConfigOriented),
-                facing = getCameraFacing(rearCameraId)
+                facing = getCameraFacing(rearCameraId),
+                previewSurfaceSecondary = rearPreviewSurfaceSecondary
             )
 
             // Apply manual controls + torch up front (so the very first frames are correct).
@@ -605,6 +663,33 @@ class DualCameraRecorder {
         releaseMediaRecorders()
 
         onRecordingStopped?.invoke(frontOutputFile, rearOutputFile, null)
+    }
+
+    /**
+     * Swap the preview surfaces on the active capture sessions WITHOUT closing the
+     * camera devices. Used by the main<->fullscreen transition path while a recording
+     * is in progress, so the `MediaRecorder` keeps receiving frames throughout the
+     * toggle (the resulting video has no freeze at the toggle point).
+     *
+     * **Deprecated for runtime use.** The capture session is now created with BOTH
+     * the main and the fullscreen preview surfaces from the start, so the camera
+     * writes to both pairs of previews continuously and the activity can switch
+     * which one the user sees with a pure TextureView visibility toggle. This
+     * method is kept as a no-op for source-compatibility with the previous
+     * swap-based flow — any caller (e.g. a future test) is a no-op now because
+     * the camera no longer needs the swap. The original
+     * (close-session + recreate) implementation is still in
+     * [CameraController.swapPreviewSurface] if it's ever needed again.
+     *
+     * Safe to call when no recording is in progress.
+     */
+    fun swapPreviewSurfaces(frontSurface: Surface, rearSurface: Surface) {
+        // The dual-surface design means the camera is always already writing to
+        // the new surfaces — there is nothing to swap. We still update the
+        // stored references in case any caller relies on the side effect.
+        this.frontPreviewSurface = frontSurface
+        this.rearPreviewSurface = rearSurface
+        Log.d(TAG, "swapPreviewSurfaces: no-op (dual-surface session keeps both pairs alive)")
     }
 
     private fun applyManualControls(controller: CameraController, config: StreamConfig, isFront: Boolean) {

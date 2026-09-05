@@ -114,16 +114,6 @@ class MainActivity : AppCompatActivity() {
     // soon as the guard clears.
     private var pendingCameraChange: Boolean = false
 
-    // Last (front cam id | rear cam id | reason) for which we already showed the
-    // "camera not working" toast. DualCameraRecorder.startPreview fires onSingleCameraMode
-    // multiple times per call (once per camera's onError, then once from the final
-    // 3-second readiness check). Without this dedup, the same Toast is enqueued several
-    // times in a row and the system keeps showing it back-to-back — the user sees an
-    // endless loop of toasts, especially when entering fullscreen with a non-working
-    // camera. We only show the toast again when the state actually changes, and reset
-    // the tracker on fullscreen entry/exit so each fullscreen entry still gets one toast.
-    private var lastNotWorkingToastKey: String? = null
-
     // Manual control state — separate per camera
     private var frontFocusDistance = 0.5f
     private var rearFocusDistance = 0.5f
@@ -148,11 +138,16 @@ class MainActivity : AppCompatActivity() {
     // All permissions the app needs in order to function. The list is built
     // once on construction from the manifest + API level so we request exactly
     // what the OS expects:
-    //  - CAMERA + RECORD_AUDIO: always required (preview + audio capture)
+    //  - CAMERA + RECORD_AUDIO: always required (preview + audio capture).
     //  - WRITE_EXTERNAL_STORAGE: required to save MP4 files to the public Movies
-    //    directory. On API 29+ this still works thanks to the manifest flag
-    //    `requestLegacyExternalStorage="true"`; the permission remains a normal
-    //    runtime permission on every API level we support (minSdk = 26).
+    //    directory. ONLY asked on API 26-29, where legacy storage is in effect
+    //    and the permission actually grants write access. On API 30+ scoped
+    //    storage is mandatory, the permission is a no-op (and on API 33+ it
+    //    is also no longer shown in the system dialog), so requesting it just
+    //    makes `checkSelfPermission` return DENIED forever and triggers a
+    //    bogus "storage required" toast on every launch. With `requestLegacy
+    //    ExternalStorage="true"` the app still writes to Movies up to API 29;
+    //    on API 30+ it relies on scoped storage instead.
     //  - READ_EXTERNAL_STORAGE / READ_MEDIA_VIDEO / READ_MEDIA_AUDIO: required
     //    so the user can browse their recordings with the system file picker
     //    and so the app's own listing of saved files survives a process death.
@@ -161,26 +156,42 @@ class MainActivity : AppCompatActivity() {
     private val permissionsNeeded: Array<String> by lazy {
         val list = mutableListOf(
             Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.WRITE_EXTERNAL_STORAGE
+            Manifest.permission.RECORD_AUDIO
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // API 33+ — READ_EXTERNAL_STORAGE is deprecated; ask for granular
-            // media permissions so the user sees only the categories we need.
-            list.add(Manifest.permission.READ_MEDIA_VIDEO)
-            list.add(Manifest.permission.READ_MEDIA_AUDIO)
-        } else {
-            // API 26-32 — the legacy single storage permission is still the
-            // right thing to request.
-            list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
+                // API 33+ — WRITE_EXTERNAL_STORAGE and READ_EXTERNAL_STORAGE
+                // are both deprecated; ask for the granular media permissions
+                // so the user sees only the categories we need.
+                list.add(Manifest.permission.READ_MEDIA_VIDEO)
+                list.add(Manifest.permission.READ_MEDIA_AUDIO)
+            }
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                // API 30-32 — WRITE_EXTERNAL_STORAGE is a no-op under scoped
+                // storage, so don't request it (the system won't grant it).
+                // READ_EXTERNAL_STORAGE is still the right read permission.
+                list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            else -> {
+                // API 26-29 — legacy storage is in effect, WRITE_EXTERNAL_STORAGE
+                // is required to write to the public Movies directory and is
+                // paired with the matching READ_EXTERNAL_STORAGE.
+                list.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                list.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
         }
         list.toTypedArray()
     }
 
-    // Same list as `permissionsNeeded` but without CAMERA. Used by the second
-    // re-request flow when the user already has CAMERA but denied storage.
+    // Storage-only subset of `permissionsNeeded` (CAMERA and RECORD_AUDIO
+    // filtered out). Used by the storage-granted check and by the re-request
+    // flow when the user already has CAMERA but denied storage. RECORD_AUDIO
+    // is excluded on purpose: the storage toast must not depend on the mic
+    // permission, which is tracked separately by `audioGranted`.
     private val storageOnlyPermissionsNeeded: Array<String> by lazy {
-        permissionsNeeded.filter { it != Manifest.permission.CAMERA }.toTypedArray()
+        permissionsNeeded
+            .filter { it != Manifest.permission.CAMERA && it != Manifest.permission.RECORD_AUDIO }
+            .toTypedArray()
     }
 
     private val permissionLauncher = registerForActivityResult(
@@ -358,6 +369,7 @@ class MainActivity : AppCompatActivity() {
         setupSurfaceCallbacks()
         setupRecordingButton()
         setupFullscreenButton()
+        setupRestoreCamerasButton()
         setupBackButton()
         setupFullscreenControlsToggle()
         setupFullscreenLandscapeCheckbox()
@@ -427,10 +439,11 @@ class MainActivity : AppCompatActivity() {
         // Called by DualCameraRecorder when a camera fails to open (or when the open itself
         // fails with an exception). The position is one of:
 //   - "front-not-working" / "rear-not-working" / "both-not-working" / "error"
-// We do NOT auto-pick an alternate camera — instead we show a Toast advising the user
-// to pick a different camera via the spinner. The preview cards remain visible (the
-// failing one shows a black TextureView since its camera never opened).
-        dualCameraRecorder.onSingleCameraMode = { reason ->
+// We do NOT auto-pick an alternate camera — the user picks one via the spinner. The
+// preview cards remain visible (the failing one shows a black TextureView since its
+// camera never opened). Per the user's request, no Toast is shown here: the failing
+// preview card is the visual indicator.
+        dualCameraRecorder.onSingleCameraMode = { _ ->
             runOnUiThread {
                 // Keep both preview cards visible so the layout stays consistent.
                 if (isFullscreen) {
@@ -441,29 +454,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     binding.frontPreviewCard.visibility = View.VISIBLE
                     binding.rearPreviewCard.visibility = View.VISIBLE
-                }
-                // DualCameraRecorder.startPreview() fires onSingleCameraMode multiple
-                // times per call (once per camera's onError, plus once from the final
-                // 3-second readiness check), and the callback can also fire for the
-                // previous preview's stale controller if closePreview() didn't reap its
-                // thread in time. Showing the Toast for every fire stacks them in the
-                // system Toast queue and the user sees the same message loop over and
-                // over — most visibly when entering fullscreen with a non-working
-                // camera. De-duplicate by (front id, rear id, reason) so the toast is
-                // only shown when the state actually changes. The tracker is reset on
-                // fullscreen entry/exit so each fullscreen entry still surfaces one
-                // toast if the cameras are still not working.
-                val cfg = settingsStore.config.value
-                val key = "${cfg.frontCameraId}|${cfg.rearCameraId}|$reason"
-                if (key != lastNotWorkingToastKey) {
-                    lastNotWorkingToastKey = key
-                    val msg = when (reason) {
-                        "front-not-working" -> getString(R.string.camera_not_working_front)
-                        "rear-not-working" -> getString(R.string.camera_not_working_rear)
-                        "both-not-working" -> getString(R.string.camera_not_working_both)
-                        else -> getString(R.string.camera_not_working_error)
-                    }
-                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 }
                 requestPreviewTransforms()
             }
@@ -575,6 +565,53 @@ class MainActivity : AppCompatActivity() {
     private fun setupFullscreenButton() {
         binding.btnFullscreenPreview.setOnClickListener { toggleFullscreen() }
         binding.btnExitFullscreen.setOnClickListener { toggleFullscreen() }
+    }
+
+    /**
+     * Wire the "Restore Cameras" button. When clicked, it stops the current
+     * preview and restarts it through the same dual-surface capture-session
+     * path the fullscreen enter used to use (stopCurrentPreviewAndWait +
+     * startCamerasIfReady / startFullscreenCamerasIfReady). This is a
+     * full refresh: both previews will block briefly while the cameras are
+     * re-opened, but the dual-surface design means the fullscreen-side
+     * preview (when the user is in fullscreen) re-uses the same code path
+     * and ends up in the correct state. Disabled while a recording is in
+     * progress — see [lockOrientationControls].
+     */
+    private fun setupRestoreCamerasButton() {
+        binding.btnRestoreCameras.setOnClickListener {
+            // Guard against concurrent calls: if a start is already in flight
+            // the re-entrancy guard inside restartPreview will skip, so bounce
+            // off here too to keep the button from being a no-op and leaving
+            // the user wondering why nothing happened.
+            if (camerasStarting) {
+                Log.d(TAG, "btnRestoreCameras ignored: camerasStarting is true")
+                return@setOnClickListener
+            }
+            // The button is disabled while recording (lockOrientationControls),
+            // but a defensive check keeps the behaviour correct if the disabled
+            // state ever lags the actual recording state (e.g. focus timing).
+            if (isRecording) {
+                Log.d(TAG, "btnRestoreCameras ignored: recording in progress")
+                return@setOnClickListener
+            }
+            Log.d(TAG, "btnRestoreCameras: restarting preview")
+            // Use restartPreview() — the exact same path the camera-spinner
+            // callback takes when the user changes a camera. That path is the
+            // proven-working one for "re-open the cameras and show the live
+            // preview again"; using it here means the button behaves identically
+            // to a no-op camera change. In particular, restartPreview() reads
+            // cfg.frontCameraId / cfg.rearCameraId from the settings store, so
+            // the previews come back showing exactly the cameras currently
+            // selected in the spinners at the moment the button is pressed.
+            //
+            // Note: we deliberately do NOT call stopCurrentPreviewAndWait() or
+            // reset camerasStarting here — restartPreview() does both itself
+            // (it owns the full close-then-reopen cycle and the re-entrancy
+            // guard). Calling them up-front would either be a no-op or would
+            // race the guard inside restartPreview().
+            restartPreview()
+        }
     }
 
     /**
@@ -1741,6 +1778,34 @@ class MainActivity : AppCompatActivity() {
 
         val frontSt = frontSurfaceView.surfaceTexture
         val rearSt = rearSurfaceView.surfaceTexture
+        // We deliberately do NOT require the fullscreen pair's SurfaceTextures
+        // here, even though the dual-surface design includes them in the
+        // capture session when they're available. In practice the fullscreen
+        // pair's TextureViews (which live inside the INVISIBLE fullscreen
+        // overlay) do not always have a SurfaceTexture ready at the exact
+        // moment the main pair's surface listener fires — the listener for
+        // the fullscreen pair either fires slightly later or, on some
+        // devices, not at all until the user actually enters fullscreen for
+        // the first time. If we gate startup on the fullscreen pair being
+        // ready, the first call to startCamerasIfReady() fails the all-4
+        // check, schedules a 100 ms retry, and the retry races the re-entrancy
+        // guard and the other surface listeners; on a cold start the
+        // previews stay black until the user changes the camera (which goes
+        // through restartPreview(), which only needs the active pair) or
+        // enters fullscreen (which causes the fullscreen listener to fire
+        // and triggers startFullscreenCamerasIfReady() once all 4 are
+        // available). Matching the camera-spinner path — only require the
+        // active pair — gets the previews up at app start. The fullscreen
+        // pair is still passed into setupPreview() below when its
+        // SurfaceTexture IS available, so a later fullscreen toggle is the
+        // pure-visibility-change path on devices where the surfaces were
+        // ready in time. On devices where they weren't, the first fullscreen
+        // toggle re-runs setupPreview() to add the fullscreen pair to the
+        // session (the reconfigure path is what restartPreview() already
+        // takes, so behaviour stays consistent with the camera-change path).
+        val fullscreenFrontSt = fullscreenFrontSurfaceView.surfaceTexture
+        val fullscreenRearSt = fullscreenRearSurfaceView.surfaceTexture
+        val fullscreenPairReady = fullscreenFrontSt != null && fullscreenRearSt != null
 
         if (frontSt != null && rearSt != null) {
             camerasStarting = true
@@ -1764,8 +1829,19 @@ class MainActivity : AppCompatActivity() {
             // The empirical retry loop in DualCameraRecorder may swap to a different
             // (front, rear) and call onBeforeOpenFallback before opening, which resizes
             // the buffers to the picked size for the new cameras.
+            // Size the active pair's buffers up front. The fullscreen pair's buffers
+            // are only sized here if its SurfaceTexture is already available — on a
+            // cold start it often is (the INVISIBLE overlay is laid out), but we
+            // don't block startup on it. If the fullscreen pair's SurfaceTexture
+            // becomes available later, requestPreviewTransforms() (called below)
+            // will size it via setDefaultBufferSize() and the first fullscreen
+            // entry will reconfigure the session to include it.
             resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = false, surface = frontSt)
             resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = false, surface = rearSt)
+            if (fullscreenPairReady) {
+                resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = true, surface = fullscreenFrontSt!!)
+                resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = true, surface = fullscreenRearSt!!)
+            }
             // Stop the current preview AND yield briefly so the camera HAL has a moment
             // to start releasing the old devices before we ask it to open a new one.
             // closePreview() interrupts the previous preview thread and joins for 50 ms,
@@ -1785,7 +1861,14 @@ class MainActivity : AppCompatActivity() {
                 frontPreviewSurface = Surface(frontSt),
                 rearPreviewSurface = Surface(rearSt),
                 frontSurfaceTexture = frontSt,
-                rearSurfaceTexture = rearSt
+                rearSurfaceTexture = rearSt,
+                // Include the fullscreen preview surfaces in the session if they're
+                // already available, so a later fullscreen toggle on those devices
+                // is a pure view-level change. On devices where they're not ready
+                // at startup, we pass null and the first fullscreen entry will
+                // reconfigure the session to add them.
+                frontPreviewSurfaceSecondary = if (fullscreenPairReady) Surface(fullscreenFrontSt!!) else null,
+                rearPreviewSurfaceSecondary = if (fullscreenPairReady) Surface(fullscreenRearSt!!) else null
             )
             // Apply the activity's current orientation to the cameras so the HAL
             // rotates the preview frames correctly from the very first frame.
@@ -1839,6 +1922,15 @@ class MainActivity : AppCompatActivity() {
 
         val frontSt = fullscreenFrontSurfaceView.surfaceTexture
         val rearSt = fullscreenRearSurfaceView.surfaceTexture
+        // Symmetric to startCamerasIfReady(): only require the ACTIVE pair (the
+        // fullscreen pair here), so a fullscreen entry recovers the previews even
+        // if the main pair's SurfaceTextures haven't been created yet. The main
+        // pair is still passed into setupPreview() below when its SurfaceTexture
+        // IS available, so a later exitFullscreen can be a pure view-level change
+        // on devices where the main surfaces were ready in time.
+        val mainFrontSt = frontSurfaceView.surfaceTexture
+        val mainRearSt = rearSurfaceView.surfaceTexture
+        val mainPairReady = mainFrontSt != null && mainRearSt != null
 
         if (frontSt != null && rearSt != null) {
             camerasStarting = true
@@ -1863,6 +1955,19 @@ class MainActivity : AppCompatActivity() {
             // for the wrong camera/orientation shows a black square.
             resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = true, surface = frontSt)
             resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = true, surface = rearSt)
+            // Also pre-size the main pair's buffers if they're already available.
+            // The main pair is part of the capture session too (the session
+            // always holds both pairs) and the first exitFullscreen would
+            // otherwise need to re-allocate the main pair's SurfaceTexture
+            // buffers to match the camera's picked size, causing a brief preview
+            // freeze on the first exit. Symmetric to the startCamerasIfReady
+            // path. We don't block the fullscreen start on the main pair's
+            // readiness — if it isn't ready, we pass null for the secondary
+            // surfaces and the first exitFullscreen will reconfigure the session.
+            if (mainPairReady) {
+                resizeBufferToPickedSizeForPair(frontCamId, isFront = true, isFullscreen = false, surface = mainFrontSt!!)
+                resizeBufferToPickedSizeForPair(rearCamId, isFront = false, isFullscreen = false, surface = mainRearSt!!)
+            }
             // Yield briefly so the camera HAL has a moment to start releasing the
             // old devices before we ask it to open a new one. Mirrors the
             // startCamerasIfReady / enterFullscreen / exitFullscreen pattern.
@@ -1873,7 +1978,14 @@ class MainActivity : AppCompatActivity() {
                 frontPreviewSurface = Surface(frontSt),
                 rearPreviewSurface = Surface(rearSt),
                 frontSurfaceTexture = frontSt,
-                rearSurfaceTexture = rearSt
+                rearSurfaceTexture = rearSt,
+                // Include the main preview surfaces in the session if they're
+                // already available, so a later exitFullscreen on those devices
+                // is a pure view-level change. On devices where they aren't
+                // ready, we pass null and the first exitFullscreen will
+                // reconfigure the session to add them.
+                frontPreviewSurfaceSecondary = if (mainPairReady) Surface(mainFrontSt!!) else null,
+                rearPreviewSurfaceSecondary = if (mainPairReady) Surface(mainRearSt!!) else null
             )
             // Apply the activity's current orientation so the HAL rotates the
             // preview frames correctly for the fullscreen view as well.
@@ -1994,7 +2106,11 @@ class MainActivity : AppCompatActivity() {
             frontPreviewSurface = Surface(frontSt),
             rearPreviewSurface = Surface(rearSt),
             frontSurfaceTexture = frontSt,
-            rearSurfaceTexture = rearSt
+            rearSurfaceTexture = rearSt,
+            // Always include the fullscreen preview surfaces in the session so
+            // a future fullscreen toggle is a pure view-level change.
+            frontPreviewSurfaceSecondary = fullscreenFrontSurfaceView.surfaceTexture?.let { Surface(it) },
+            rearPreviewSurfaceSecondary = fullscreenRearSurfaceView.surfaceTexture?.let { Surface(it) }
         )
         // Apply the activity's current orientation so the HAL rotates the preview
         // frames correctly after the restart.
@@ -2029,12 +2145,22 @@ class MainActivity : AppCompatActivity() {
      * then we retry a few times.
      */
     private fun requestPreviewTransforms() {
+        // Always apply the transform to BOTH the main and fullscreen pair, regardless
+        // of the current isFullscreen state. The capture session holds both pairs from
+        // camera-open onwards, so both SurfaceTextures are live and need the correct
+        // FIT_CENTER transform and buffer size from the start. Skipping the fullscreen
+        // pair here (the previous behaviour) meant the first call to
+        // requestPreviewTransforms() after the user entered fullscreen had to
+        // setDefaultBufferSize() on the fullscreen pair's SurfaceTexture for the
+        // first time, which re-allocates the texture's buffers and produces a brief
+        // preview freeze the user reported. The fullscreen TextureViews live inside
+        // the INVISIBLE overlay (not GONE), so they are laid out from activity
+        // start — the transform can be computed against real dimensions even when
+        // the overlay is not currently visible.
         requestPreviewTransform(isFront = true, isFullscreen = false)
         requestPreviewTransform(isFront = false, isFullscreen = false)
-        if (isFullscreen) {
-            requestPreviewTransform(isFront = true, isFullscreen = true)
-            requestPreviewTransform(isFront = false, isFullscreen = true)
-        }
+        requestPreviewTransform(isFront = true, isFullscreen = true)
+        requestPreviewTransform(isFront = false, isFullscreen = true)
     }
 
     private fun requestPreviewTransform(isFront: Boolean, isFullscreen: Boolean) {
@@ -2245,9 +2371,6 @@ class MainActivity : AppCompatActivity() {
         // other surface set). Reuse the same flow as enter/exitFullscreen — fully close the
         // preview, wait for the cameras to release, then re-arm on the active surface set.
         stopCurrentPreviewAndWait()
-        // Reset the "camera not working" toast tracker so the new preview attempt is treated as a
-        // fresh state and the user gets at most one toast if it fails (matches enter/exitFullscreen).
-        lastNotWorkingToastKey = null
         // Release the re-entrancy guard in case any prior start path left it set; otherwise
         // startCamerasIfReady / startFullscreenCamerasIfReady would return immediately and the
         // previews would stay frozen.
@@ -2262,6 +2385,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun lockOrientationControls(locked: Boolean) {
         binding.landscapeCheckbox.isEnabled = !locked
+        // The front/rear camera selection is also locked while a recording is in
+        // progress. Switching the camera mid-recording would tear down the current
+        // capture session and re-open the cameras with a new id, which is exactly
+        // the same kind of gap-producing close+reopen cycle that the fullscreen
+        // swap path works around — the recorded video would freeze at the switch
+        // point. The MediaRecorder was also prepared against the current camera
+        // ids, so silently swapping cameras would also be confusing. Disable the
+        // spinners instead so the user sees the cameras that are actually in use.
+        binding.frontCameraSpinner.isEnabled = !locked
+        binding.rearCameraSpinner.isEnabled = !locked
+        // The "Restore Cameras" button stops and re-opens both previews, which
+        // would tear down the capture session the MediaRecorder is currently
+        // writing into. Block it while a recording is in progress for the same
+        // reason the camera-selection spinners are blocked: keep the recorded
+        // video gap-free and avoid confusing state where the running cameras
+        // don't match what the user selected.
+        binding.btnRestoreCameras.isEnabled = !locked
         // Per-camera video settings (resolution, FPS, bitrate) cannot be
         // changed while a recording is in progress — touching the
         // StreamConfig mid-recording would have no effect on the running
@@ -2693,16 +2833,14 @@ class MainActivity : AppCompatActivity() {
         if (isFullscreen) return
         Log.d(TAG, "enterFullscreen: stopping main preview first")
         isFullscreen = true
-        // Reset the "camera not working" toast tracker: each fullscreen entry is a
-        // fresh preview attempt, and the user expects to see at most one toast
-        // telling them the camera is still not working. Without this, if the same
-        // (front, rear) pair failed in the main view and the toast already fired,
-        // opening fullscreen would suppress the toast entirely (since the dedup key
-        // is unchanged). Resetting it here guarantees the user gets the toast once
-        // for the fullscreen attempt if the cameras are still not working.
-        lastNotWorkingToastKey = null
         // The fullscreen follows the activity's main landscape mode (no separate toggle).
         applyFullscreenOrientation()
+        // The overlay starts with clickable=false / focusable=false in the layout
+        // so it can lay out its TextureViews (creating their SurfaceTextures) but
+        // doesn't intercept touches over the main view. Make the overlay a real
+        // fullscreen takeover now that we're showing it.
+        binding.fullscreenPreviewOverlay.isClickable = true
+        binding.fullscreenPreviewOverlay.isFocusable = true
         binding.fullscreenPreviewOverlay.visibility = View.VISIBLE
         binding.fullscreenPreviewOverlay.requestFocus()
         // Reset to "controls visible" each time the user enters fullscreen.
@@ -2737,18 +2875,39 @@ class MainActivity : AppCompatActivity() {
         // dimensions.
         binding.root.post { positionFullscreenLabels() }
 
-        // Stop the main preview AND wait for the cameras to be fully released
-        // before re-arming on the fullscreen surfaces. Without the wait, the new
-        // start can race the still-closing cameras and report ERROR_CAMERA_IN_USE,
-        // which the user sees as a frozen black preview until the next camera
-        // change. closePreview() does its own thread join but is not always
-        // synchronous from the camera HAL's point of view, so we poll.
-        stopCurrentPreviewAndWait()
-        // Once the cameras are released, the fullscreen SurfaceTexture listeners
-        // (already attached) will see the new surface and call
-        // startFullscreenCamerasIfReady. We also call it directly so the request
-        // is queued immediately if the surfaces are already available.
-        startFullscreenCamerasIfReady()
+        if (isRecording) {
+            // The capture session was set up with BOTH the main and fullscreen
+            // preview surfaces from the start (see startCamerasIfReady), so the
+            // camera is already writing to the fullscreen TextureView's
+            // SurfaceTexture. Entering fullscreen during recording is therefore a
+            // pure view-level change — flip the overlay's visibility and
+            // clickable/focusable flags so it covers the screen and intercepts
+            // touches. The MediaRecorder keeps receiving frames uninterrupted,
+            // so the recorded video has no gap at the toggle.
+        } else {
+            // Same as the recording case: the capture session was set up with
+            // BOTH the main and fullscreen preview surfaces from the start, so
+            // the camera is already writing to the fullscreen TextureView's
+            // SurfaceTexture. There's no MediaRecorder to worry about, but
+            // there are live preview TextureView consumers on both pairs of
+            // surfaces, and the previous (close+reopen) implementation
+            // produced a visible brief freeze at every fullscreen toggle
+            // because the camera HAL had to re-allocate buffers for the
+            // "new" preview surface. The dual-surface design eliminates that
+            // gap — the fullscreen toggle is a pure TextureView visibility
+            // flip here too.
+            //
+            // We still need to apply the FIT_CENTER preview transforms to the
+            // fullscreen TextureViews now that they're being shown: the
+            // transforms are computed against the TextureView's actual
+            // dimensions and the camera's negotiated preview size, and they
+            // were only applied for the main pair when startCamerasIfReady()
+            // ran (because isFullscreen was false at that point). The
+            // requestPreviewTransform calls retry briefly until the
+            // CameraController exposes its preview size, so this works on the
+            // first toggle after a fresh camera open.
+            requestPreviewTransforms()
+        }
     }
 
     /**
@@ -2893,14 +3052,17 @@ class MainActivity : AppCompatActivity() {
         if (!isFullscreen) return
         Log.d(TAG, "exitFullscreen: stopping fullscreen preview first")
         isFullscreen = false
-        // Reset the "camera not working" toast tracker so the next main-view preview
-        // attempt is treated as a fresh state and surfaces the toast at most once if
-        // the cameras are still not working.
-        lastNotWorkingToastKey = null
         // Restore to the checkbox-driven orientation, not the device sensor.
         requestedOrientation =
             if (isLandscapeMode) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        binding.fullscreenPreviewOverlay.visibility = View.GONE
+        // Drop the overlay's touch interception and go back to INVISIBLE — the
+        // TextureViews keep their SurfaceTextures alive (so the camera is still
+        // writing to them), but the overlay no longer draws or blocks the main
+        // view. The INVISIBLE state also matches the XML default, so future
+        // fullscreen entries start from the same baseline.
+        binding.fullscreenPreviewOverlay.isClickable = false
+        binding.fullscreenPreviewOverlay.isFocusable = false
+        binding.fullscreenPreviewOverlay.visibility = View.INVISIBLE
 
         // Switch the digital meters back to the default rendering for the
         // in-card layout (see enterFullscreen for the matching brighter-mode
@@ -2908,20 +3070,30 @@ class MainActivity : AppCompatActivity() {
         binding.digitalMeterFrontFullscreen.setBrighterMode(false)
         binding.digitalMeterRearFullscreen.setBrighterMode(false)
 
-        // Stop the fullscreen preview AND wait for the cameras to be fully
-        // released before re-arming on the main surfaces — see the matching
-        // stopCurrentPreviewAndWait in enterFullscreen.
-        stopCurrentPreviewAndWait()
-        // Release the re-entrancy guard. startFullscreenCamerasIfReady set
-        // camerasStarting=true for 5s; if the user exits fullscreen inside that
-        // window, the guard is still true here and startCamerasIfReady() would
-        // return immediately, leaving the main previews frozen.
-        camerasStarting = false
-        // The main SurfaceTexture listeners are still attached, so once the
-        // cameras are released they will trigger startCamerasIfReady via the
-        // surface callback. We also call it directly to kick off the request
-        // if the surfaces are already available.
-        startCamerasIfReady()
+        if (isRecording) {
+            // The capture session was set up with BOTH the main and fullscreen
+            // preview surfaces from the start (see startCamerasIfReady), so the
+            // camera is still writing to the main TextureView's SurfaceTexture
+            // after the overlay goes back to INVISIBLE. Exiting fullscreen
+            // during recording is therefore a pure view-level change — no
+            // camera reconfiguration, no MediaRecorder frame drop, no gap in
+            // the recorded video.
+        } else {
+            // Same as the recording case: the capture session already has BOTH
+            // pairs of preview surfaces, so the camera is still writing to the
+            // main TextureView's SurfaceTexture after the overlay goes back to
+            // INVISIBLE. The fullscreen toggle is a pure view-level change
+            // here too — no close+reopen, no brief preview freeze.
+            //
+            // Re-apply the FIT_CENTER preview transforms for the main pair
+            // (the only ones visible now) so the freshly-revealed TextureView
+            // shows the camera at the right aspect ratio. The transforms were
+            // applied for both pairs when startFullscreenCamerasIfReady()
+            // originally opened the cameras, but it's cheap to re-apply on
+            // every exit since the computation reads the TextureView's
+            // current dimensions.
+            requestPreviewTransforms()
+        }
     }
 
     // ==================== Settings ====================
