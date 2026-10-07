@@ -18,9 +18,12 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.util.Size
+import android.annotation.SuppressLint
+import android.view.MotionEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewTreeObserver
 import android.view.animation.AnimationUtils
 import android.widget.AdapterView
@@ -37,6 +40,7 @@ import com.dualcamerarecording.audio.MicObserver
 import com.dualcamerarecording.audio.MicState
 import com.dualcamerarecording.audio.view.AnalogMeterView
 import com.dualcamerarecording.audio.view.DigitalMeterView
+import com.dualcamerarecording.camera.CameraCapabilities
 import com.dualcamerarecording.camera.CameraInventory
 import com.dualcamerarecording.camera.DualCameraRecorder
 import com.dualcamerarecording.data.PreferencesRepository
@@ -47,11 +51,13 @@ import com.dualcamerarecording.model.AppThemeMode
 import com.dualcamerarecording.model.ControlMode
 import com.dualcamerarecording.model.DualCameraConfig
 import com.dualcamerarecording.model.MeterStyle
+import com.dualcamerarecording.model.AspectRatio
 import com.dualcamerarecording.model.StreamBitrate
 import com.dualcamerarecording.model.StreamConfig
-import com.dualcamerarecording.model.StreamFps
 import com.dualcamerarecording.model.StreamOrientation
 import com.dualcamerarecording.model.StreamResolution
+import com.dualcamerarecording.recording.MediaCapabilities
+import com.dualcamerarecording.service.RecordingService
 import com.dualcamerarecording.settings.CameraSettingsStore
 import com.dualcamerarecording.theme.ThemeManager
 import com.dualcamerarecording.ui.AlertDialogHelper
@@ -61,6 +67,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
 
@@ -165,6 +174,9 @@ class MainActivity : AppCompatActivity() {
                 // so the user sees only the categories we need.
                 list.add(Manifest.permission.READ_MEDIA_VIDEO)
                 list.add(Manifest.permission.READ_MEDIA_AUDIO)
+                // Shows the "recording in progress" notification of the foreground
+                // service. Optional: recording works without it.
+                list.add(Manifest.permission.POST_NOTIFICATIONS)
             }
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
                 // API 30-32 — WRITE_EXTERNAL_STORAGE is a no-op under scoped
@@ -190,7 +202,10 @@ class MainActivity : AppCompatActivity() {
     // permission, which is tracked separately by `audioGranted`.
     private val storageOnlyPermissionsNeeded: Array<String> by lazy {
         permissionsNeeded
-            .filter { it != Manifest.permission.CAMERA && it != Manifest.permission.RECORD_AUDIO }
+            .filter {
+                it != Manifest.permission.CAMERA && it != Manifest.permission.RECORD_AUDIO &&
+                    it != Manifest.permission.POST_NOTIFICATIONS
+            }
             .toTypedArray()
     }
 
@@ -282,6 +297,16 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        // The fullscreen TextureViews stay INVISIBLE until fullscreen is entered, and a
+        // TextureView only creates its SurfaceTexture when it is first drawn: too late to
+        // be part of the camera sessions, so the fullscreen previews were black while
+        // recording (and the first fullscreen entry restarted the cameras). Give them a
+        // SurfaceTexture now: both preview pairs are always in the session and entering
+        // fullscreen is a pure visibility change.
+        listOf(fullscreenFrontSurfaceView, fullscreenRearSurfaceView).forEach { view ->
+            if (view.surfaceTexture == null) view.setSurfaceTexture(SurfaceTexture(false))
+        }
+
         initListeners()
         observeSettings()
 
@@ -327,9 +352,53 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "MainActivity created")
     }
 
+    /** True when onStop released the cameras and the microphone (activity not visible). */
+    private var releasedInBackground = false
+
+    override fun onStart() {
+        super.onStart()
+        if (isRecording) {
+            // Back from the background during a recording: feed the previews again.
+            dualCameraRecorder.setPreviewOutputsEnabled(true)
+            return
+        }
+        if (releasedInBackground) {
+            releasedInBackground = false
+            if (hasRequiredPermissions()) {
+                // Cameras and microphone were released in onStop: re-open them, so the
+                // previews come back without pressing "Restore Cameras".
+                camerasStarting = false
+                if (isFullscreen) startFullscreenCamerasIfReady() else startCamerasIfReady()
+                app.ensureMicCaptureStarted()
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isRecording) {
+            // The recording keeps running (foreground service); nobody draws the previews,
+            // so only the encoders receive frames until the activity is visible again.
+            dualCameraRecorder.setPreviewOutputsEnabled(false)
+            return
+        }
+        if (!isChangingConfigurations) {
+            // Not visible and not recording: release camera and microphone for other apps.
+            releasedInBackground = true
+            stopCurrentPreview()
+            app.stopLiveMicCapture()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        // Finalizes a recording still in progress so the files stay playable.
+        val wasRecording = isRecording
         dualCameraRecorder.release()
+        if (wasRecording) {
+            RecordingService.stop(this)
+            app.micStateStore.setRecording(false)
+        }
         stopRecordingTimer()
         micUnsubscribe?.invoke()
         micUnsubscribe = null
@@ -375,7 +444,7 @@ class MainActivity : AppCompatActivity() {
         setupFullscreenLandscapeCheckbox()
         setupSettingsAndFlashButtons()
         setupLandscapeCheckbox()
-        setupAutofocusOnTapCheckbox()
+        setupAspectCheckboxes()
         setupCameraSpinners()
         setupResolutionFpsSpinners()
         setupBitrateSpinners()
@@ -384,56 +453,32 @@ class MainActivity : AppCompatActivity() {
         setupFocusSeekBar()
         setupZoomSeekBar()
 
-        // Notify the user (via Toast) when the empirical retry loop in DualCameraRecorder
-        // swapped to a different (front, rear) pair than the one we asked for (because
-        // the device doesn't support the chosen combination concurrently). Also update
-        // the spinners to reflect the cameras actually in use, so the UI doesn't lie
-        // about which camera is being recorded.
-        dualCameraRecorder.onPairFallback = { frontId, rearId ->
-            val rearLabel = rearCameraOptions.firstOrNull { it.cameraId == rearId }?.label
-                ?: rearId
-            val frontLabel = frontCameraOptions.firstOrNull { it.cameraId == frontId }?.label
-                ?: frontId
-            runOnUiThread {
-                // Persist the actual pair so the spinners + recording use them.
-                val cfg = settingsStore.config.value
-                var changed = false
-                if (cfg.frontCameraId != frontId) {
-                    settingsStore.updateFrontCameraId(frontId)
-                    changed = true
-                }
-                if (cfg.rearCameraId != rearId) {
-                    settingsStore.updateRearCameraId(rearId)
-                    changed = true
-                }
-                Toast.makeText(
-                    this,
-                    getString(R.string.fallback_pair, "$frontLabel + $rearLabel"),
-                    Toast.LENGTH_LONG
-                ).show()
-                if (changed) {
-                    // Re-apply transform for the new (actual) camera pair.
-                    requestPreviewTransforms()
+        // Recording state reported by the recorder (main thread). Started = both files
+        // (or only one when a camera failed) are really being written; stopped = the files
+        // are finalized, after the user pressed Stop or after a failure.
+        dualCameraRecorder.onRecordingStarted = { frontFile, rearFile ->
+            if (isRecording && !isFinishingRecording) {
+                // The files really start now: start the timer from here.
+                recordingStartTime = System.currentTimeMillis()
+                startRecordingTimer()
+                binding.statusTitle.setText(R.string.recording_in_progress)
+                if (frontFile == null || rearFile == null) {
+                    val message = if (frontFile != null) R.string.recording_only_front else R.string.recording_only_rear
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this, R.string.recording_started, Toast.LENGTH_SHORT).show()
                 }
             }
         }
+        dualCameraRecorder.onRecordingStopped = { frontFile, rearFile, error ->
+            onRecordingFinished(frontFile, rearFile, error)
+        }
 
-        // Called by the retry loop BEFORE the camera is opened with a fallback pair, so we
-        // can resize the SurfaceTexture buffer to the picked size for the new camera. The
-        // empirical retry may swap to a different (front, rear) than pickWorkingPair
-        // returned (e.g. on devices where concurrentCameraIds is empty, so pickWorkingPair
-        // is optimistic). The actual pair is only known after the first open attempt.
-        dualCameraRecorder.onBeforeOpenFallback = { frontId, rearId ->
-            val frontSt = if (isFullscreen) fullscreenFrontSurfaceView.surfaceTexture
-                          else frontSurfaceView.surfaceTexture
-            val rearSt = if (isFullscreen) fullscreenRearSurfaceView.surfaceTexture
-                         else rearSurfaceView.surfaceTexture
-            if (frontSt != null) {
-                resizeBufferToPickedSizeForPair(frontId, isFront = true, isFullscreen = isFullscreen, surface = frontSt)
-            }
-            if (rearSt != null) {
-                resizeBufferToPickedSizeForPair(rearId, isFront = false, isFullscreen = isFullscreen, surface = rearSt)
-            }
+        // The selected pair cannot stream together on this device: remember it (so it is
+        // not retried at every launch) and mark it in the camera spinners.
+        dualCameraRecorder.onPairIncompatible = { frontId, rearId ->
+            preferences.setCameraPairIncompatible(frontId, rearId, true)
+            syncLocalFromStore(settingsStore.config.value)
         }
 
         // Called by DualCameraRecorder when a camera fails to open (or when the open itself
@@ -461,11 +506,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Re-size the SurfaceTexture buffer to match the size the camera with id [camId] will
-     * pick, but using the configuration currently in effect for the given [isFront] +
-     * [isFullscreen] pair. Called when the retry loop swaps to a different camera so the
-     * texture view doesn't end up with a buffer that's a different size from what the
-     * new camera writes.
+     * Size the SurfaceTexture buffer to the preview stream size of camera [camId]. The
+     * camera writes the preview at the SurfaceTexture's default buffer size, so it must be
+     * set before the capture session is created. The preview size is capped (see
+     * [CameraCapabilities.previewSize]) independently of the recording resolution: full
+     * sensor-size previews were one reason two cameras could not run together.
      *
      * Optionally takes an explicit [surface] to resize (otherwise looks up the
      * main-activity or fullscreen view by isFront/isFullscreen).
@@ -485,26 +530,8 @@ class MainActivity : AppCompatActivity() {
             view.surfaceTexture
         } ?: return
         val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
-        val cfg = settingsStore.config.value
-        val streamConfig = if (isFront) cfg.frontConfig else cfg.rearConfig
-        val orientation = currentStreamOrientation(forFullscreen = isFullscreen)
-        val target = Size(
-            streamConfig.resolution.widthFor(orientation),
-            streamConfig.resolution.heightFor(orientation)
-        )
-        val sizes = try {
-            val chars = cm.getCameraCharacteristics(camId)
-            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val sts = map?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
-            if (!sts.isNullOrEmpty()) sts else map?.getOutputSizes(Surface::class.java)
-        } catch (e: Exception) { null }
-        if (sizes == null || sizes.isEmpty()) return
-        val exact = sizes.firstOrNull { it.width == target.width && it.height == target.height }
-        val picked = exact ?: sizes.minByOrNull {
-            val r = it.width.toDouble() / it.height.toDouble()
-            val tR = target.width.toDouble() / target.height.toDouble()
-            kotlin.math.abs(r - tR) * 1000 - it.width
-        } ?: return
+        if (camId.isEmpty()) return
+        val picked = CameraCapabilities.previewSize(cm, camId, dualCameraRecorder.previewAspectOf(isFront))
         Log.d(TAG, "Buffer for ${if (isFront) "front" else "rear"}${if (isFullscreen) "(fs)" else ""} ($camId) -> $picked")
         st.setDefaultBufferSize(picked.width, picked.height)
     }
@@ -535,15 +562,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Set the buffer size on the SurfaceTexture to the selected resolution's camera size. */
+    /** Set the buffer size on the SurfaceTexture to the selected camera's preview size. */
     private fun prepareSurfaceTexture(surface: SurfaceTexture, isFront: Boolean, isFullscreen: Boolean) {
         val cfg = settingsStore.config.value
-        val streamConfig = if (isFront) cfg.frontConfig else cfg.rearConfig
-        val orientation = currentStreamOrientation(forFullscreen = isFullscreen)
-        surface.setDefaultBufferSize(
-            streamConfig.resolution.widthFor(orientation),
-            streamConfig.resolution.heightFor(orientation)
-        )
+        val camId = if (isFront) cfg.frontCameraId else cfg.rearCameraId
+        resizeBufferToPickedSizeForPair(camId, isFront, isFullscreen, surface)
     }
 
     private fun setupRecordingButton() {
@@ -777,29 +800,107 @@ class MainActivity : AppCompatActivity() {
         binding.btnFlash.setOnClickListener { toggleFlash() }
         binding.btnFlashFullscreen.setOnClickListener { toggleFlash() }
 
-        frontSurfaceView.setOnTouchListener { _, event ->
-            handleTapToFocus(event.x, event.y, frontSurfaceView, isFront = true)
+        attachPreviewGestures(frontSurfaceView, isFront = true)
+        attachPreviewGestures(rearSurfaceView, isFront = false)
+        attachPreviewGestures(fullscreenFrontSurfaceView, isFront = true)
+        attachPreviewGestures(fullscreenRearSurfaceView, isFront = false)
+    }
+
+    /**
+     * Touch handling of a preview, as in the camera app: a tap focuses at that point, two
+     * fingers pinch to zoom in or out. A gesture that used two fingers or moved never ends
+     * in a focus cycle, so zooming does not trigger a refocus at the release point.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun attachPreviewGestures(view: TextureView, isFront: Boolean) {
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        var downX = 0f
+        var downY = 0f
+        var isTap = false
+        // Distance between the first two fingers at the previous event (0 = no pinch).
+        // ScaleGestureDetector is not used: it ignores pinches narrower than ~27 mm, which
+        // is about the whole width of a preview card.
+        var lastSpan = 0f
+        fun span(event: MotionEvent): Float =
+            hypot(event.getX(0) - event.getX(1), event.getY(0) - event.getY(1))
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    isTap = true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    isTap = false
+                    if (event.pointerCount >= 2) {
+                        lastSpan = span(event)
+                        // While pinching, the page must not scroll under the fingers. With
+                        // one finger it still scrolls (taps only focus on release).
+                        view.parent?.requestDisallowInterceptTouchEvent(true)
+                    }
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(event.x - downX) > touchSlop || abs(event.y - downY) > touchSlop) isTap = false
+                    if (event.pointerCount >= 2 && lastSpan > 0f) {
+                        val current = span(event)
+                        if (current > 0f) pinchZoom(isFront, current / lastSpan)
+                        lastSpan = current
+                    }
+                }
+                // Lifting one of the two fingers ends the pinch: the page scrolls again.
+                MotionEvent.ACTION_POINTER_UP -> if (event.pointerCount <= 2) {
+                    lastSpan = 0f
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                // One focus cycle per tap (on release), not one per touch event.
+                MotionEvent.ACTION_UP -> {
+                    if (isTap) handleTapToFocus(event.x, event.y, view, isFront)
+                    lastSpan = 0f
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    isTap = false
+                    lastSpan = 0f
+                    view.parent?.requestDisallowInterceptTouchEvent(false)
+                }
+            }
             true
         }
-        rearSurfaceView.setOnTouchListener { _, event ->
-            handleTapToFocus(event.x, event.y, rearSurfaceView, isFront = false)
-            true
-        }
-        fullscreenFrontSurfaceView.setOnTouchListener { _, event ->
-            handleTapToFocus(event.x, event.y, fullscreenFrontSurfaceView, isFront = true)
-            true
-        }
-        fullscreenRearSurfaceView.setOnTouchListener { _, event ->
-            handleTapToFocus(event.x, event.y, fullscreenRearSurfaceView, isFront = false)
-            true
+    }
+
+    /**
+     * Zoom by a pinch step: the zoom factor (1x .. the camera's max digital zoom) is
+     * multiplied by [scaleFactor], so the image follows the fingers, and the result is
+     * mirrored on the zoom sliders.
+     */
+    private fun pinchZoom(isFront: Boolean, scaleFactor: Float) {
+        val cfg = settingsStore.config.value
+        val cameraId = if (isFront) cfg.frontCameraId else cfg.rearCameraId
+        if (cameraId.isEmpty()) return
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val maxZoom = CameraCapabilities.maxDigitalZoom(cm, cameraId)
+        if (maxZoom <= 1f) return
+        val current = if (isFront) frontLinearZoom else rearLinearZoom
+        val ratio = (1f + (maxZoom - 1f) * current) * scaleFactor
+        val linear = ((ratio - 1f) / (maxZoom - 1f)).coerceIn(0f, 1f)
+        if (linear == current) return
+        val progress = (linear * 100f).roundToInt()
+        if (isFront) {
+            frontLinearZoom = linear
+            binding.zoomSeekBarFront.progress = progress
+            binding.zoomSeekBarFullscreenFront.progress = progress
+            applyLinearZoomToFrontCamera()
+        } else {
+            rearLinearZoom = linear
+            binding.zoomSeekBarRear.progress = progress
+            binding.zoomSeekBarFullscreenRear.progress = progress
+            applyLinearZoomToRearCamera()
         }
     }
 
     /**
      * Tap-to-focus on a preview.
      *
-     * - If the "Autofocus on tap" checkbox is UNCHECKED, this is a no-op (the user
-     *   has chosen to use the flash button instead, so taps do nothing).
      * - If "Manual Focus" is checked, the seekbar's current value is re-applied so the
      *   change is visible immediately. The camera stays in manual-focus mode (the user
      *   is responsible for picking the focus distance via the seekbar / -+ buttons).
@@ -808,10 +909,6 @@ class MainActivity : AppCompatActivity() {
      *   independent of the ISO/exposure toggles).
      */
     private fun handleTapToFocus(x: Float, y: Float, view: TextureView, isFront: Boolean) {
-        // Taps are no-ops when "Autofocus on tap" is off — the user has explicitly
-        // disabled the feature and is using the flash button instead.
-        if (!settingsStore.config.value.autofocusOnTap) return
-
         val (reticle, checkbox) = when (view) {
             frontSurfaceView -> binding.frontFocusReticle to binding.manualFocusCheckboxFront
             rearSurfaceView -> binding.rearFocusReticle to binding.manualFocusCheckboxRear
@@ -830,17 +927,12 @@ class MainActivity : AppCompatActivity() {
             // is visible immediately.
             if (isFront) applyFocusToFrontCamera() else applyFocusToRearCamera()
         } else {
-            // Auto focus: trigger an AF cycle at the tap point. Independent of whether
-            // "Manual Adjustments" is enabled — focus is its own checkbox.
-            val viewW = view.width.toFloat().coerceAtLeast(1f)
-            val viewH = view.height.toFloat().coerceAtLeast(1f)
-            val normX = (x / viewW).coerceIn(0f, 1f)
-            val normY = (y / viewH).coerceIn(0f, 1f)
-            if (isFront) {
-                dualCameraRecorder.triggerAutoFocusFront(normX, normY)
-            } else {
-                dualCameraRecorder.triggerAutoFocusRear(normX, normY)
-            }
+            // Auto focus: trigger an AF cycle at the tap point. The controller maps the
+            // tap back through the view transform (letterbox, landscape rotation) and the
+            // camera's own transform (sensor orientation, front mirroring) to the sensor.
+            dualCameraRecorder.triggerAutoFocusAt(
+                isFront, x, y, view.width, view.height, view.getTransform(null)
+            )
         }
     }
 
@@ -889,7 +981,8 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Refresh resolution labels (3:4 vs 4:3) and restore preview with the new aspect.
-            rebuildResolutionAdapters()
+            applyAspectLabels()
+            refreshVideoOptions(settingsStore.config.value)
             restartPreview()
             requestPreviewTransforms()
 
@@ -911,29 +1004,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * "Autofocus on tap" checkbox — switches between two mutually exclusive modes:
-     *  - checked: tap-to-focus is enabled on every preview surface, and the flash
-     *    button is disabled.
-     *  - unchecked: the flash button is enabled and the touch listeners are
-     *    no-ops (taps do nothing).
-     *
-     * The state is persisted via [settingsStore] so the user's choice survives
-     * app restarts. The two checkboxes (main activity + fullscreen overlay)
-     * are kept in sync by routing both through the same settings field, and
-     * [syncLocalFromStore] re-derives the flash button enable state on every
-     * settings change.
+     * Per-camera "16:9" checkboxes: switch one camera between 4:3 and 16:9 recording (the two
+     * cameras may differ). Its resolution spinner then lists the resolutions of that shape,
+     * and the previews are reopened with streams of the same shape so they show the recorded
+     * framing. Locked while recording (see [lockOrientationControls]).
      */
-    private fun setupAutofocusOnTapCheckbox() {
-        binding.autofocusOnTapCheckbox.setOnCheckedChangeListener { _, checked ->
-            if (bindingInProgress) return@setOnCheckedChangeListener
-            settingsStore.updateAutofocusOnTap(checked)
-            // The fullscreen checkbox is bound to the same state via
-            // syncLocalFromStore, so toggling the main one automatically
-            // mirrors the fullscreen overlay.
+    private fun setupAspectCheckboxes() {
+        val cfg = settingsStore.config.value
+        dualCameraRecorder.frontPreviewAspect = cfg.frontConfig.aspect
+        dualCameraRecorder.rearPreviewAspect = cfg.rearConfig.aspect
+        binding.frontAspect16x9Checkbox.isChecked = cfg.frontConfig.aspect == AspectRatio.RATIO_16_9
+        binding.rearAspect16x9Checkbox.isChecked = cfg.rearConfig.aspect == AspectRatio.RATIO_16_9
+        applyAspectLabels()
+        listOf(true to binding.frontAspect16x9Checkbox, false to binding.rearAspect16x9Checkbox)
+            .forEach { (isFront, checkbox) ->
+                checkbox.setOnCheckedChangeListener { _, checked ->
+                    if (bindingInProgress) return@setOnCheckedChangeListener
+                    val selected = if (checked) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+                    val current = settingsStore.config.value.let { if (isFront) it.frontConfig else it.rearConfig }
+                    if (selected == current.aspect) return@setOnCheckedChangeListener
+                    settingsStore.updateAspect(isFront, selected)
+                    if (isFront) dualCameraRecorder.frontPreviewAspect = selected
+                    else dualCameraRecorder.rearPreviewAspect = selected
+                    if (isLandscapeMode) applyPreviewCardSizing(landscape = true)
+                    restartPreview()
+                    requestPreviewTransforms()
+                }
+            }
+    }
+
+    /**
+     * Name the shapes as the user sees them: 16:9 / 4:3 in landscape, 9:16 / 3:4 in portrait
+     * (the recording is rotated the same way).
+     */
+    private fun applyAspectLabels() {
+        val wide = if (isLandscapeMode) "16:9" else "9:16"
+        val standard = if (isLandscapeMode) "4:3" else "3:4"
+        listOf(binding.frontAspect16x9Checkbox, binding.rearAspect16x9Checkbox).forEach {
+            it.text = getString(R.string.aspect_wide_format, wide)
         }
-        binding.autofocusOnTapCheckboxFullscreen.setOnCheckedChangeListener { _, checked ->
-            if (bindingInProgress) return@setOnCheckedChangeListener
-            settingsStore.updateAutofocusOnTap(checked)
+        listOf(binding.frontAspect16x9Hint, binding.rearAspect16x9Hint).forEach {
+            it.text = getString(R.string.aspect_wide_hint_format, wide, standard)
         }
     }
 
@@ -948,15 +1059,15 @@ class MainActivity : AppCompatActivity() {
      */
     private fun applyPreviewCardSizing(landscape: Boolean) {
         // In both modes the cards share a row via weight=1, so each card's width is
-        // roughly half the available width. The user asked for the previews to keep
-        // a 4:3 aspect ratio, so we size the card height from the per-card width.
+        // roughly half the available width. In landscape the card height follows the
+        // per-card width with the shape of the recording (4:3 or 16:9).
         val marginPx = 5.dpToPx()
         val lpFront = binding.frontPreviewCard.layoutParams as android.widget.LinearLayout.LayoutParams
         val lpRear = binding.rearPreviewCard.layoutParams as android.widget.LinearLayout.LayoutParams
         // In portrait, the card is just 220dp tall (compact card under the controls).
         // In landscape, set the height from the actual measured card width so the card
-        // is always 4:3 even when the parent (previewContainer) is narrower than the
-        // full screen (because of the parent padding, nav bar, etc.).
+        // keeps the recording shape even when the parent (previewContainer) is narrower
+        // than the full screen (because of the parent padding, nav bar, etc.).
         lpFront.width = 0  // 0dp + weight=1 in the XML
         lpRear.width = 0
         if (landscape) {
@@ -1005,6 +1116,16 @@ class MainActivity : AppCompatActivity() {
         treeObs.addOnGlobalLayoutListener(listener)
     }
 
+    /**
+     * Height of a [width]-wide landscape preview frame: the recording shape, or 4:3 when the
+     * two cameras differ (the 16:9 one is letterboxed, both cards stay the same height).
+     */
+    private fun landscapeHeightFor(width: Int): Int {
+        val cfg = settingsStore.config.value
+        val bothWide = cfg.frontConfig.aspect == AspectRatio.RATIO_16_9 && cfg.rearConfig.aspect == AspectRatio.RATIO_16_9
+        return if (bothWide) width * 9 / 16 else width * 3 / 4
+    }
+
     private fun removeCardSizingListener() {
         val tagKey = R.id.frontPreviewCard
         val listener = binding.root.getTag(tagKey) as? android.view.ViewTreeObserver.OnGlobalLayoutListener ?: return
@@ -1013,7 +1134,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyTargetHeight(landscape: Boolean, cardW: Int) {
-        val targetHeight = if (landscape) (cardW * 3 / 4) else 220.dpToPx()
+        val targetHeight = if (landscape) landscapeHeightFor(cardW) else 220.dpToPx()
         val lpf = binding.frontPreviewCard.layoutParams as android.widget.LinearLayout.LayoutParams
         val lpr = binding.rearPreviewCard.layoutParams as android.widget.LinearLayout.LayoutParams
         if (lpf.height == targetHeight && lpr.height == targetHeight) return
@@ -1071,91 +1192,163 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ==================== Per-camera video options ====================
+
+    /**
+     * Resolution / FPS / bitrate values offered for one camera: only what the selected
+     * camera and the H.264 encoder really support, so the recorded file matches the
+     * selection (previously every preset was offered and the camera or MediaRecorder
+     * silently used something else).
+     */
+    private class VideoOptions(
+        val resolutions: List<StreamResolution>,
+        val fps: List<Int>,
+        val bitrates: List<StreamBitrate>,
+        val resolutionLabels: List<String>,
+        val fpsLabels: List<String>,
+        val bitrateLabels: List<String>
+    )
+
+    private var frontVideoOptions: VideoOptions? = null
+    private var rearVideoOptions: VideoOptions? = null
+
     private fun setupResolutionFpsSpinners() {
-        rebuildResolutionAdapters()
-
-        val fpsAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, fpsLabels())
-        fpsAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.frontFpsSpinner.adapter = fpsAdapter
-        binding.rearFpsSpinner.adapter = fpsAdapter
-
-        binding.frontResolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val res = StreamResolution.entries[position]
-                val cfg = settingsStore.config.value.frontConfig
-                settingsStore.updateFrontConfig(cfg.copy(resolution = res))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.frontResolutionSpinner.onItemSelectedListener = videoSpinnerListener(isFront = true) { options, position, cfg ->
+            options.resolutions.getOrNull(position)?.let { cfg.copy(resolution = it) }
         }
-        binding.rearResolutionSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val res = StreamResolution.entries[position]
-                val cfg = settingsStore.config.value.rearConfig
-                settingsStore.updateRearConfig(cfg.copy(resolution = res))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.rearResolutionSpinner.onItemSelectedListener = videoSpinnerListener(isFront = false) { options, position, cfg ->
+            options.resolutions.getOrNull(position)?.let { cfg.copy(resolution = it) }
         }
-        binding.frontFpsSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val fps = StreamFps.entries[position]
-                val cfg = settingsStore.config.value.frontConfig
-                settingsStore.updateFrontConfig(cfg.copy(fps = fps))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.frontFpsSpinner.onItemSelectedListener = videoSpinnerListener(isFront = true) { options, position, cfg ->
+            options.fps.getOrNull(position)?.let { cfg.copy(fps = it) }
         }
-        binding.rearFpsSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val fps = StreamFps.entries[position]
-                val cfg = settingsStore.config.value.rearConfig
-                settingsStore.updateRearConfig(cfg.copy(fps = fps))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.rearFpsSpinner.onItemSelectedListener = videoSpinnerListener(isFront = false) { options, position, cfg ->
+            options.fps.getOrNull(position)?.let { cfg.copy(fps = it) }
         }
-    }
-
-    /** Rebuild the two resolution spinners with labels for the current orientation. */
-    private fun rebuildResolutionAdapters() {
-        val prevFrontSel = binding.frontResolutionSpinner.selectedItemPosition
-        val prevRearSel = binding.rearResolutionSpinner.selectedItemPosition
-        val orientation = currentStreamOrientation()
-        val resAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item,
-            StreamResolution.entries.map { it.labelFor(orientation) })
-        resAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.frontResolutionSpinner.adapter = resAdapter
-        binding.rearResolutionSpinner.adapter = resAdapter
-        if (prevFrontSel in 0 until StreamResolution.entries.size) binding.frontResolutionSpinner.setSelection(prevFrontSel, false)
-        if (prevRearSel in 0 until StreamResolution.entries.size) binding.rearResolutionSpinner.setSelection(prevRearSel, false)
+        refreshVideoOptions(settingsStore.config.value)
     }
 
     private fun setupBitrateSpinners() {
-        val bitrateAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, bitrateLabels())
-        bitrateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.frontBitrateSpinner.adapter = bitrateAdapter
-        binding.rearBitrateSpinner.adapter = bitrateAdapter
-
-        binding.frontBitrateSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val bitrate = StreamBitrate.entries[position]
-                val cfg = settingsStore.config.value.frontConfig
-                settingsStore.updateFrontConfig(cfg.copy(bitrate = bitrate))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.frontBitrateSpinner.onItemSelectedListener = videoSpinnerListener(isFront = true) { options, position, cfg ->
+            options.bitrates.getOrNull(position)?.let { cfg.copy(bitrate = it) }
         }
-        binding.rearBitrateSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
-                if (bindingInProgress) return
-                val bitrate = StreamBitrate.entries[position]
-                val cfg = settingsStore.config.value.rearConfig
-                settingsStore.updateRearConfig(cfg.copy(bitrate = bitrate))
-            }
-            override fun onNothingSelected(parent: AdapterView<*>) {}
+        binding.rearBitrateSpinner.onItemSelectedListener = videoSpinnerListener(isFront = false) { options, position, cfg ->
+            options.bitrates.getOrNull(position)?.let { cfg.copy(bitrate = it) }
         }
     }
+
+    private fun videoSpinnerListener(
+        isFront: Boolean,
+        apply: (VideoOptions, Int, StreamConfig) -> StreamConfig?
+    ) = object : AdapterView.OnItemSelectedListener {
+        override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
+            if (bindingInProgress) return
+            val options = (if (isFront) frontVideoOptions else rearVideoOptions) ?: return
+            val cfg = settingsStore.config.value
+            val current = if (isFront) cfg.frontConfig else cfg.rearConfig
+            val updated = apply(options, position, current) ?: return
+            if (updated == current) return
+            if (isFront) settingsStore.updateFrontConfig(updated) else settingsStore.updateRearConfig(updated)
+            if (updated.fps != current.fps) dualCameraRecorder.setTargetFps(isFront, updated.fps)
+        }
+        override fun onNothingSelected(parent: AdapterView<*>) {}
+    }
+
+    /** Recompute the video options of both cameras and sync the spinners. */
+    private fun refreshVideoOptions(config: DualCameraConfig) {
+        refreshVideoOptionsFor(isFront = true, config.frontCameraId, config.frontConfig, config.frontConfig.aspect)
+        refreshVideoOptionsFor(isFront = false, config.rearCameraId, config.rearConfig, config.rearConfig.aspect)
+    }
+
+    /**
+     * Build the spinner lists of one camera with only what it can record: the resolutions of
+     * the selected shape ([aspect]) supported by the camera and the encoder, the frame rates
+     * the camera can hold at that resolution, and the bitrates the encoder can deliver.
+     */
+    private fun refreshVideoOptionsFor(isFront: Boolean, cameraId: String, current: StreamConfig, aspect: AspectRatio) {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val known = cameraId.isNotEmpty()
+        // The saved preference is the target; the current values may be a reduced version
+        // of it for a camera that did not support it.
+        val stream = current.copy(
+            resolution = if (isFront) preferences.frontResolution else preferences.rearResolution,
+            fps = if (isFront) preferences.frontFps else preferences.rearFps,
+            bitrate = if (isFront) preferences.frontBitrate else preferences.rearBitrate
+        )
+        // Until the camera is known only the saved values are listed.
+        val resolutions = if (!known) listOf(stream.resolution) else StreamResolution.of(aspect).filter { res ->
+            CameraCapabilities.isRecordingSizeSupported(cm, cameraId, Size(res.landscapeWidth, res.landscapeHeight)) &&
+                MediaCapabilities.isVideoSupported(res.landscapeWidth, res.landscapeHeight, 1)
+        }.ifEmpty { listOf(stream.resolution) }
+        val resolution = if (stream.resolution in resolutions) stream.resolution else closestResolution(resolutions, stream.resolution)
+        val size = Size(resolution.landscapeWidth, resolution.landscapeHeight)
+
+        val fpsList = if (!known) listOf(stream.fps) else {
+            CameraCapabilities.frameRateOptions(cm, cameraId, size)
+                .filter { MediaCapabilities.isVideoSupported(size.width, size.height, it) }
+                .ifEmpty { listOf(stream.fps) }
+        }
+        val fps = if (stream.fps in fpsList) stream.fps else fpsList.minByOrNull { kotlin.math.abs(it - stream.fps) }!!
+
+        val minBps = MediaCapabilities.videoBitrateRange()?.lower ?: 0
+        val maxBps = MediaCapabilities.maxVideoBitrate() ?: Int.MAX_VALUE
+        val bitrates = StreamBitrate.entries.filter { it == StreamBitrate.AUTO || it.bps in minBps..maxBps }
+        // A saved bitrate above what this device can encode becomes the highest one it can.
+        val bitrate = when {
+            stream.bitrate in bitrates -> stream.bitrate
+            stream.bitrate.bps > maxBps -> bitrates.last()
+            else -> StreamBitrate.AUTO
+        }
+        val autoMbps = MediaCapabilities.autoVideoBitrate(size.width, size.height, fps) / 1_000_000.0
+
+        val orientation = currentStreamOrientation()
+        val options = VideoOptions(
+            resolutions = resolutions,
+            fps = fpsList,
+            bitrates = bitrates,
+            resolutionLabels = resolutions.map { it.labelFor(orientation) },
+            fpsLabels = fpsList.map { getString(R.string.fps_format, it) },
+            bitrateLabels = bitrates.map {
+                if (it == StreamBitrate.AUTO) getString(R.string.bitrate_auto_format, autoMbps) else it.label
+            }
+        )
+        val previous = if (isFront) frontVideoOptions else rearVideoOptions
+        if (isFront) frontVideoOptions = options else rearVideoOptions = options
+
+        val resolutionSpinner = if (isFront) binding.frontResolutionSpinner else binding.rearResolutionSpinner
+        val fpsSpinner = if (isFront) binding.frontFpsSpinner else binding.rearFpsSpinner
+        val bitrateSpinner = if (isFront) binding.frontBitrateSpinner else binding.rearBitrateSpinner
+        val wasBinding = bindingInProgress
+        bindingInProgress = true
+        if (previous?.resolutionLabels != options.resolutionLabels) resolutionSpinner.adapter = spinnerAdapter(options.resolutionLabels)
+        if (previous?.fpsLabels != options.fpsLabels) fpsSpinner.adapter = spinnerAdapter(options.fpsLabels)
+        if (previous?.bitrateLabels != options.bitrateLabels) bitrateSpinner.adapter = spinnerAdapter(options.bitrateLabels)
+        resolutionSpinner.setSelection(resolutions.indexOf(resolution).coerceAtLeast(0), false)
+        fpsSpinner.setSelection(fpsList.indexOf(fps).coerceAtLeast(0), false)
+        bitrateSpinner.setSelection(bitrates.indexOf(bitrate).coerceAtLeast(0), false)
+        bindingInProgress = wasBinding
+
+        // Values the selected camera cannot deliver are replaced for this camera only;
+        // the saved preference stays as it is.
+        if (known && (resolution != current.resolution || fps != current.fps || bitrate != current.bitrate)) {
+            Log.d(TAG, "${if (isFront) "Front" else "Rear"} camera $cameraId: using $resolution / $fps / $bitrate " +
+                "(saved: ${stream.resolution} / ${stream.fps} / ${stream.bitrate})")
+            settingsStore.applyEffectiveConfig(isFront, current.copy(resolution = resolution, fps = fps, bitrate = bitrate))
+            if (fps != current.fps) dualCameraRecorder.setTargetFps(isFront, fps)
+        }
+    }
+
+    private fun closestResolution(options: List<StreamResolution>, target: StreamResolution): StreamResolution {
+        val pixels = { r: StreamResolution -> r.landscapeWidth * r.landscapeHeight }
+        return options.filter { pixels(it) <= pixels(target) }.maxByOrNull(pixels)
+            ?: options.minByOrNull(pixels)
+            ?: target
+    }
+
+    private fun spinnerAdapter(labels: List<String>): ArrayAdapter<String> =
+        ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).apply {
+            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
 
     /**
      * Audio settings (format / bitrate / sample rate). Mirrors the spinner
@@ -1168,9 +1361,8 @@ class MainActivity : AppCompatActivity() {
      * ALLOWED_BITRATES / ALLOWED_SAMPLE_RATES.
      */
     private fun setupAudioSpinners() {
-        // Audio format is fixed to AAC (the only format MediaRecorder/MPEG_4 supports
-        // for audio inside the MP4 container). Show "AAC" as a static label and disable
-        // the spinner so the layout has a stable shape.
+        // Audio format is fixed to AAC (AAC-LC stereo inside the MP4 container). Show
+        // "AAC" as a static label and disable the spinner so the layout has a stable shape.
         val formatAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, audioFormatLabels())
         formatAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.audioFormatSpinner.adapter = formatAdapter
@@ -1178,22 +1370,20 @@ class MainActivity : AppCompatActivity() {
         binding.audioFormatSpinner.isEnabled = false
         applyAudioBitrateVisibility()
 
-        // AAC bitrate spinner.
-        val bitrates = PreferencesRepository.ALLOWED_BITRATES
-        val bitrateLabels = bitrates.map { getString(R.string.audio_bitrate_format, it) }
-        val bitrateAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, bitrateLabels)
-        bitrateAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        binding.audioBitrateSpinner.adapter = bitrateAdapter
+        // AAC bitrate spinner: the valid values depend on the sample rate (see
+        // refreshAudioBitrateOptions), so the list is rebuilt when the sample rate changes.
         binding.audioBitrateSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>, view: View?, position: Int, id: Long) {
                 if (bindingInProgress) return
-                val kbps = bitrates.getOrNull(position) ?: return
+                val kbps = audioBitrateOptions.getOrNull(position) ?: return
                 if (kbps != settingsStore.config.value.audioBitrateKbps) {
                     settingsStore.updateAudioBitrateKbps(kbps)
                 }
             }
             override fun onNothingSelected(parent: AdapterView<*>) {}
         }
+        val cfg = settingsStore.config.value
+        refreshAudioBitrateOptions(cfg.audioSampleRateHz, cfg.audioBitrateKbps)
 
         // Sample rate spinner.
         val sampleRates = PreferencesRepository.ALLOWED_SAMPLE_RATES
@@ -1207,10 +1397,29 @@ class MainActivity : AppCompatActivity() {
                 val hz = sampleRates.getOrNull(position) ?: return
                 if (hz != settingsStore.config.value.audioSampleRateHz) {
                     settingsStore.updateAudioSampleRateHz(hz)
+                    // The live capture feeds the recording: it must run at the new rate.
+                    app.restartMicCapture()
                 }
             }
             override fun onNothingSelected(parent: AdapterView<*>) {}
         }
+    }
+
+    /** AAC bitrates (kbps) currently offered; depends on the selected sample rate. */
+    private var audioBitrateOptions: List<Int> = emptyList()
+
+    private fun refreshAudioBitrateOptions(sampleRate: Int, selectedKbps: Int) {
+        val options = PreferencesRepository.allowedBitratesFor(sampleRate)
+        val wasBinding = bindingInProgress
+        bindingInProgress = true
+        if (options != audioBitrateOptions) {
+            audioBitrateOptions = options
+            binding.audioBitrateSpinner.adapter =
+                spinnerAdapter(options.map { getString(R.string.audio_bitrate_format, it) })
+        }
+        val index = options.indexOf(selectedKbps).let { if (it < 0) options.lastIndex else it }
+        binding.audioBitrateSpinner.setSelection(index.coerceAtLeast(0), false)
+        bindingInProgress = wasBinding
     }
 
     /** Format labels for the audio format spinner. Format is fixed to AAC for MP4. */
@@ -1602,39 +1811,29 @@ class MainActivity : AppCompatActivity() {
         bindingInProgress = true
 
         val frontAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item,
-            frontCameraOptions.map { it.label })
+            frontCameraOptions.map { cameraLabel(it, config.frontCameraId, config.rearCameraId, isFront = true) })
         frontAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.frontCameraSpinner.adapter = frontAdapter
         val frontSelIdx = frontCameraOptions.indexOfFirst { it.cameraId == config.frontCameraId }
         binding.frontCameraSpinner.setSelection(frontSelIdx.coerceAtLeast(0), false)
 
         val rearAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item,
-            rearCameraOptions.map { it.label })
+            rearCameraOptions.map { cameraLabel(it, config.frontCameraId, config.rearCameraId, isFront = false) })
         rearAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         binding.rearCameraSpinner.adapter = rearAdapter
         val rearSelIdx = rearCameraOptions.indexOfFirst { it.cameraId == config.rearCameraId }
         binding.rearCameraSpinner.setSelection(rearSelIdx.coerceAtLeast(0), false)
 
-        val frontResIdx = StreamResolution.entries.indexOf(config.frontConfig.resolution).coerceAtLeast(0)
-        binding.frontResolutionSpinner.setSelection(frontResIdx, false)
-        val rearResIdx = StreamResolution.entries.indexOf(config.rearConfig.resolution).coerceAtLeast(0)
-        binding.rearResolutionSpinner.setSelection(rearResIdx, false)
-        binding.frontFpsSpinner.setSelection(
-            StreamFps.entries.indexOf(config.frontConfig.fps).coerceAtLeast(0), false)
-        binding.rearFpsSpinner.setSelection(
-            StreamFps.entries.indexOf(config.rearConfig.fps).coerceAtLeast(0), false)
-        binding.frontBitrateSpinner.setSelection(
-            StreamBitrate.entries.indexOf(config.frontConfig.bitrate).coerceAtLeast(0), false)
-        binding.rearBitrateSpinner.setSelection(
-            StreamBitrate.entries.indexOf(config.rearConfig.bitrate).coerceAtLeast(0), false)
+        // Resolution / FPS / bitrate: only what the selected cameras support.
+        binding.frontAspect16x9Checkbox.isChecked = config.frontConfig.aspect == AspectRatio.RATIO_16_9
+        binding.rearAspect16x9Checkbox.isChecked = config.rearConfig.aspect == AspectRatio.RATIO_16_9
+        refreshVideoOptions(config)
+        updateManualFocusAvailability(config)
 
         // Audio settings — format is fixed to AAC, AAC bitrate, sample rate.
         binding.audioFormatSpinner.setSelection(0, false)
         applyAudioBitrateVisibility()
-        val allowedBitrates = PreferencesRepository.ALLOWED_BITRATES
-        val bitrateIdx = if (allowedBitrates.isEmpty()) 0
-            else allowedBitrates.indexOf(config.audioBitrateKbps).let { if (it < 0) allowedBitrates.lastIndex else it }
-        binding.audioBitrateSpinner.setSelection(bitrateIdx.coerceAtLeast(0), false)
+        refreshAudioBitrateOptions(config.audioSampleRateHz, config.audioBitrateKbps)
         val allowedSampleRates = PreferencesRepository.ALLOWED_SAMPLE_RATES
         val sampleRateIdx = if (allowedSampleRates.isEmpty()) 0
             else allowedSampleRates.indexOf(config.audioSampleRateHz).let { if (it < 0) allowedSampleRates.lastIndex else it }
@@ -1652,12 +1851,6 @@ class MainActivity : AppCompatActivity() {
 
         updateFlashButton(rearCameraOptions.getOrNull(rearSelIdx)?.hasFlash ?: false)
 
-        // Sync the "Autofocus on tap" checkboxes (main activity + fullscreen
-        // overlay) to the persisted state. updateFlashButton below reads
-        // config.autofocusOnTap to decide whether the flash button is
-        // enabled, so the two controls stay consistent.
-        binding.autofocusOnTapCheckbox.isChecked = config.autofocusOnTap
-        binding.autofocusOnTapCheckboxFullscreen.isChecked = config.autofocusOnTap
 
         bindingInProgress = false
     }
@@ -1692,7 +1885,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val defaultFront = frontCameraOptions.firstOrNull()?.cameraId ?: ""
-        val defaultRear = rearCameraOptions.firstOrNull()?.cameraId ?: ""
+        // Prefer a rear camera not already known to be incompatible with the front one.
+        val defaultRear = (rearCameraOptions.firstOrNull { !preferences.isCameraPairIncompatible(defaultFront, it.cameraId) }
+            ?: rearCameraOptions.firstOrNull())?.cameraId ?: ""
         if (defaultFront.isNotEmpty()) settingsStore.updateFrontCameraId(defaultFront)
         if (defaultRear.isNotEmpty()) settingsStore.updateRearCameraId(defaultRear)
 
@@ -1721,6 +1916,55 @@ class MainActivity : AppCompatActivity() {
         syncLocalFromStore(settingsStore.config.value)
     }
 
+    /**
+     * Spinner label of a camera; cameras known not to run together with the camera selected
+     * on the other side are marked, so the user can see which combinations work.
+     */
+    private fun cameraLabel(
+        info: CameraInventory.CameraInfo,
+        frontId: String,
+        rearId: String,
+        isFront: Boolean
+    ): String {
+        val incompatible = if (isFront) {
+            rearId.isNotEmpty() && preferences.isCameraPairIncompatible(info.cameraId, rearId)
+        } else {
+            frontId.isNotEmpty() && preferences.isCameraPairIncompatible(frontId, info.cameraId)
+        }
+        return if (incompatible) getString(R.string.camera_incompatible_label, info.label) else info.label
+    }
+
+    /**
+     * Manual focus needs a lens with adjustable focus: on fixed-focus cameras (typically
+     * the front one, LENS_INFO_MINIMUM_FOCUS_DISTANCE = 0) the checkboxes are disabled.
+     */
+    private fun updateManualFocusAvailability(config: DualCameraConfig) {
+        val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val frontSupported = config.frontCameraId.isEmpty() ||
+            CameraCapabilities.supportsManualFocus(cm, config.frontCameraId)
+        val rearSupported = config.rearCameraId.isEmpty() ||
+            CameraCapabilities.supportsManualFocus(cm, config.rearCameraId)
+        applyManualFocusAvailability(frontSupported, binding.manualFocusCheckboxFront, binding.manualFocusCheckboxFullscreenFront)
+        applyManualFocusAvailability(rearSupported, binding.manualFocusCheckboxRear, binding.manualFocusCheckboxFullscreenRear)
+    }
+
+    private fun applyManualFocusAvailability(
+        supported: Boolean,
+        main: android.widget.CheckBox,
+        fullscreen: android.widget.CheckBox
+    ) {
+        // The text colour is fixed, so a disabled checkbox looked active: dim it and say why.
+        val label = if (supported) getString(R.string.manual_focus_label)
+                    else getString(R.string.manual_focus_unavailable)
+        listOf(main, fullscreen).forEach {
+            it.isEnabled = supported
+            it.alpha = if (supported) 1f else 0.5f
+        }
+        main.text = label
+        // Unchecking runs the checkbox listener, which turns manual focus off.
+        if (!supported && main.isChecked) main.isChecked = false
+    }
+
     private fun checkPermissionsAndInit() {
         val permissionsToRequest = permissionsNeeded.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -1735,6 +1979,9 @@ class MainActivity : AppCompatActivity() {
                         binding.root.viewTreeObserver.removeOnGlobalLayoutListener(this)
                         initializeCameraSystems()
                         startCamerasIfReady()
+                        // The live capture feeds the meters and the recorded audio; it
+                        // was only started from the permission dialog callback before.
+                        app.ensureMicCaptureStarted()
                     }
                 }
             )
@@ -1825,11 +2072,8 @@ class MainActivity : AppCompatActivity() {
             }, 100)
             val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
             dualCameraRecorder.initialize(cm)
-            // Size the SurfaceTexture buffers for the desired pair as a starting point.
-            // The empirical retry loop in DualCameraRecorder may swap to a different
-            // (front, rear) and call onBeforeOpenFallback before opening, which resizes
-            // the buffers to the picked size for the new cameras.
-            // Size the active pair's buffers up front. The fullscreen pair's buffers
+            // Size the SurfaceTexture buffers to the preview stream size of the selected
+            // cameras before the sessions are created. Size the active pair's buffers up front. The fullscreen pair's buffers
             // are only sized here if its SurfaceTexture is already available — on a
             // cold start it often is (the INVISIBLE overlay is laid out), but we
             // don't block startup on it. If the fullscreen pair's SurfaceTexture
@@ -1878,11 +2122,12 @@ class MainActivity : AppCompatActivity() {
             dualCameraRecorder.setTargetRotation(
                 if (isLandscapeMode) Surface.ROTATION_90 else Surface.ROTATION_0
             )
+            dualCameraRecorder.setTargetFps(isFront = true, fps = cfg.frontConfig.fps)
+            dualCameraRecorder.setTargetFps(isFront = false, fps = cfg.rearConfig.fps)
             dualCameraRecorder.startPreview(
                 desiredFront = frontCamId,
                 desiredRear = rearCamId,
-                alternateFronts = frontCameraOptions.map { it.cameraId },
-                alternateRears = rearCameraOptions.map { it.cameraId }
+                rearKnownIncompatible = preferences.isCameraPairIncompatible(frontCamId, rearCamId)
             )
             // Re-enable capture now that the new pair is set up.
             dualCameraRecorder.setCaptureBlocked(false)
@@ -1992,11 +2237,12 @@ class MainActivity : AppCompatActivity() {
             dualCameraRecorder.setTargetRotation(
                 if (isLandscapeMode) Surface.ROTATION_90 else Surface.ROTATION_0
             )
+            dualCameraRecorder.setTargetFps(isFront = true, fps = cfg.frontConfig.fps)
+            dualCameraRecorder.setTargetFps(isFront = false, fps = cfg.rearConfig.fps)
             dualCameraRecorder.startPreview(
                 desiredFront = frontCamId,
                 desiredRear = rearCamId,
-                alternateFronts = frontCameraOptions.map { it.cameraId },
-                alternateRears = rearCameraOptions.map { it.cameraId }
+                rearKnownIncompatible = preferences.isCameraPairIncompatible(frontCamId, rearCamId)
             )
             // Re-enable capture now that the new pair is set up.
             dualCameraRecorder.setCaptureBlocked(false)
@@ -2011,41 +2257,6 @@ class MainActivity : AppCompatActivity() {
             // 100 ms is enough on every device and keeps the first-frame latency low.
             fullscreenFrontSurfaceView.postDelayed({ startFullscreenCamerasIfReady() }, 100)
         }
-    }
-
-    /**
-     * Pick the preview size the camera will use (without opening it) and set the
-     * SurfaceTexture buffer to that size. This is needed because [prepareSurfaceTexture]
-     * runs in onSurfaceTextureAvailable BEFORE we know which camera will be used; the
-     * actual camera may pick a different size than the stream config resolution, and
-     * the texture view will be mis-scaled if the buffer is left at the wrong size.
-     */
-    private fun resizeBufferToPickedSize(surface: SurfaceTexture, isFront: Boolean, fullscreen: Boolean = false) {
-        val cm = getSystemService(Context.CAMERA_SERVICE) as? CameraManager ?: return
-        val cfg = settingsStore.config.value
-        val streamConfig = if (isFront) cfg.frontConfig else cfg.rearConfig
-        val orientation = currentStreamOrientation(forFullscreen = fullscreen)
-        val target = Size(
-            streamConfig.resolution.widthFor(orientation),
-            streamConfig.resolution.heightFor(orientation)
-        )
-        val camId = if (isFront) cfg.frontCameraId else cfg.rearCameraId
-        if (camId.isEmpty()) return
-        val sizes = try {
-            val chars = cm.getCameraCharacteristics(camId)
-            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val st = map?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
-            if (!st.isNullOrEmpty()) st else map?.getOutputSizes(Surface::class.java)
-        } catch (e: Exception) { null }
-        if (sizes == null || sizes.isEmpty()) return
-        val exact = sizes.firstOrNull { it.width == target.width && it.height == target.height }
-        val picked = exact ?: sizes.minByOrNull {
-            val r = it.width.toDouble() / it.height.toDouble()
-            val tR = target.width.toDouble() / target.height.toDouble()
-            kotlin.math.abs(r - tR) * 1000 - it.width
-        } ?: return
-        Log.d(TAG, "Buffer for ${if (isFront) "front" else "rear"}${if (fullscreen) "(fs)" else ""} -> $picked")
-        surface.setDefaultBufferSize(picked.width, picked.height)
     }
 
     private fun restartPreview() {
@@ -2085,8 +2296,7 @@ class MainActivity : AppCompatActivity() {
 
         val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         dualCameraRecorder.initialize(cm)
-        // Size buffers for the desired pair; the empirical retry will resize them
-        // for the actual pair via onBeforeOpenFallback.
+        // Size the buffers to the preview stream size of the selected cameras.
         resizeBufferToPickedSizeForPair(cfg.frontCameraId, isFront = true, isFullscreen = isFullscreen, surface = frontSt)
         resizeBufferToPickedSizeForPair(cfg.rearCameraId, isFront = false, isFullscreen = isFullscreen, surface = rearSt)
         // Close the existing preview AND yield briefly so the camera HAL has a moment
@@ -2117,11 +2327,12 @@ class MainActivity : AppCompatActivity() {
         dualCameraRecorder.setTargetRotation(
             if (isLandscapeMode) Surface.ROTATION_90 else Surface.ROTATION_0
         )
+        dualCameraRecorder.setTargetFps(isFront = true, fps = cfg.frontConfig.fps)
+        dualCameraRecorder.setTargetFps(isFront = false, fps = cfg.rearConfig.fps)
         dualCameraRecorder.startPreview(
             desiredFront = cfg.frontCameraId,
             desiredRear = cfg.rearCameraId,
-            alternateFronts = frontCameraOptions.map { it.cameraId },
-            alternateRears = rearCameraOptions.map { it.cameraId }
+            rearKnownIncompatible = preferences.isCameraPairIncompatible(cfg.frontCameraId, cfg.rearCameraId)
         )
         // Re-enable capture now that the new pair is set up.
         dualCameraRecorder.setCaptureBlocked(false)
@@ -2163,7 +2374,7 @@ class MainActivity : AppCompatActivity() {
         requestPreviewTransform(isFront = false, isFullscreen = true)
     }
 
-    private fun requestPreviewTransform(isFront: Boolean, isFullscreen: Boolean) {
+    private fun requestPreviewTransform(isFront: Boolean, isFullscreen: Boolean, attempt: Int = 0) {
         val view = if (isFullscreen) {
             if (isFront) fullscreenFrontSurfaceView else fullscreenRearSurfaceView
         } else {
@@ -2172,33 +2383,30 @@ class MainActivity : AppCompatActivity() {
         // The "portrait" flag drives the rotation inside applyPreviewTransform. The fullscreen
         // follows the same activity-level landscape mode (no separate fullscreen toggle).
         val portrait = !isLandscapeMode
-        val size = if (isFront) dualCameraRecorder.frontPreviewSize() else dualCameraRecorder.rearPreviewSize()
         val cfg = settingsStore.config.value
-        val streamConfig = if (isFront) cfg.frontConfig else cfg.rearConfig
-        val fallback = Size(
-            streamConfig.resolution.widthFor(currentStreamOrientation(isFullscreen)),
-            streamConfig.resolution.heightFor(currentStreamOrientation(isFullscreen))
-        )
-        val resolved = size ?: fallback
+        val camId = if (isFront) cfg.frontCameraId else cfg.rearCameraId
+        // The preview size is known as soon as the camera is selected (it does not depend
+        // on the session), so there is normally nothing to wait for.
+        val size = (if (isFront) dualCameraRecorder.frontPreviewSize() else dualCameraRecorder.rearPreviewSize())
+            ?: camId.takeIf { it.isNotEmpty() }?.let { id ->
+                (getSystemService(Context.CAMERA_SERVICE) as? CameraManager)?.let {
+                    CameraCapabilities.previewSize(it, id, dualCameraRecorder.previewAspectOf(isFront))
+                }
+            }
 
-        // If the session hasn't selected a preview size yet, retry shortly. Was 200 ms;
-        // 50 ms keeps the preview transform in sync with the camera session without
-        // stalling the fullscreen transition on slow camera handshakes.
         if (size == null) {
-            view.postDelayed({ requestPreviewTransform(isFront, isFullscreen) }, 50)
-            // Still apply a transform with the fallback so the buffer (set to fallback) is
-            // rotated correctly while we wait.
-            applyPreviewTransform(view, fallback, portrait)
+            // Cameras not known yet (e.g. permission pending): retry for a short while only,
+            // instead of re-posting forever.
+            if (attempt < MAX_TRANSFORM_RETRIES) {
+                view.postDelayed({ requestPreviewTransform(isFront, isFullscreen, attempt + 1) }, 50)
+            }
             return
         }
 
-        // Resize the SurfaceTexture buffer to match the actual preview size the camera
-        // negotiated. Without this the camera HAL may write at a different size than the
-        // buffer claims, leaving the image tiny or off-center inside the card. SurfaceTexture
-        // does not expose the current buffer size via a getter, so we always set it; this is
-        // a no-op when the value is already correct.
+        // Keep the SurfaceTexture buffer at the preview stream size (a no-op when the value
+        // is already correct; SurfaceTexture has no getter for it).
         view.surfaceTexture?.setDefaultBufferSize(size.width, size.height)
-        applyPreviewTransform(view, resolved, portrait)
+        applyPreviewTransform(view, size, portrait)
     }
 
     private fun applyPreviewTransform(view: TextureView, size: Size, portrait: Boolean) {
@@ -2239,7 +2447,10 @@ class MainActivity : AppCompatActivity() {
         // landscape it becomes 4:3 after the additional 90° left rotation.
         val effW = srcH
         val effH = srcW
-        val scale = minOf(viewW / effW, viewH / effH)
+        // In landscape the image is then turned on its side, so it has to fit the view
+        // with its sides swapped (otherwise it fills only ~3/4 of the card).
+        val scale = if (contentRotationDeg != 0f) minOf(viewW / effH, viewH / effW)
+                    else minOf(viewW / effW, viewH / effH)
         val scaledW = effW * scale
         val scaledH = effH * scale
         val cx = viewW / 2f
@@ -2260,15 +2471,33 @@ class MainActivity : AppCompatActivity() {
             matrix.postRotate(contentRotationDeg, viewW / 2f, viewH / 2f)
         }
 
-        val bmp = try { view.getBitmap() } catch (e: Exception) { null }
-        val bmpW = bmp?.width ?: -1
-        val bmpH = bmp?.height ?: -1
+        // Visible video inside the view: the scaled image, turned on its side in landscape.
+        val videoW = if (contentRotationDeg != 0f) scaledH else scaledW
+        val videoH = if (contentRotationDeg != 0f) scaledW else scaledH
+        alignLabelWithVideo(view, (viewW - videoW) / 2f, (viewH - videoH) / 2f)
+
         Log.d(TAG, "applyPreviewTransform view=${viewW}x${viewH} src=${srcW}x${srcH} " +
             "rot=$rot contentRot=$contentRotationDeg effW=$effW effH=$effH " +
             "scale=$scale dx=$dx dy=$dy portrait=$portrait facing=$facing " +
-            "bmp=${bmpW}x${bmpH} scaledW=$scaledW scaledH=$scaledH " +
-            "vals=${matrixValues(matrix)}")
+            "scaledW=$scaledW scaledH=$scaledH vals=${matrixValues(matrix)}")
         view.setTransform(matrix)
+    }
+
+    /**
+     * Keep the camera label of [view] on the visible video ([videoLeft], [videoTop] in view
+     * coordinates) rather than on the letterbox bands around it, whatever the shape of the
+     * video (4:3 or 16:9) and of the frame. The label keeps its XML margin from that corner.
+     */
+    private fun alignLabelWithVideo(view: TextureView, videoLeft: Float, videoTop: Float) {
+        val label = when (view) {
+            frontSurfaceView -> binding.frontCameraPreviewLabel
+            rearSurfaceView -> binding.rearCameraPreviewLabel
+            fullscreenFrontSurfaceView -> binding.fullscreenFrontLabel
+            fullscreenRearSurfaceView -> binding.fullscreenRearLabel
+            else -> return
+        }
+        label.translationX = videoLeft.coerceAtLeast(0f)
+        label.translationY = videoTop.coerceAtLeast(0f)
     }
 
     private fun matrixValues(m: Matrix): String {
@@ -2292,8 +2521,11 @@ class MainActivity : AppCompatActivity() {
 
     // ==================== Recording ====================
 
+    /** True between the Stop tap and the moment the recorded files are finalized. */
+    private var isFinishingRecording = false
+
     private fun startRecording() {
-        if (isRecording) return
+        if (isRecording || isFinishingRecording) return
 
         // Wire up audio capture callbacks so the MicStateStore tracks recording
         // state in sync with the DualCameraRecorder.
@@ -2308,79 +2540,112 @@ class MainActivity : AppCompatActivity() {
         // The fullscreen follows the activity-level landscape checkbox, so a single
         // currentStreamOrientation() call covers both the main and fullscreen recording.
         val screenOrientation = currentStreamOrientation()
-        // Update the config with current orientation so MediaRecorder uses correct dimensions
-        settingsStore.updateFrontConfig(cfg.frontConfig.copy(streamOrientation = screenOrientation))
-        settingsStore.updateRearConfig(cfg.rearConfig.copy(streamOrientation = screenOrientation))
+        // In-memory only: the saved video preferences must not be replaced by the values
+        // currently in effect for the selected cameras.
+        settingsStore.applyEffectiveConfig(isFront = true, cfg.frontConfig.copy(streamOrientation = screenOrientation))
+        settingsStore.applyEffectiveConfig(isFront = false, cfg.rearConfig.copy(streamOrientation = screenOrientation))
+        // The live microphone capture (same one as the meters) provides the audio of both files.
+        val mic = app.micCapture
         val files = dualCameraRecorder.startRecording(
             frontConfig = cfg.frontConfig.copy(streamOrientation = screenOrientation),
             rearConfig = cfg.rearConfig.copy(streamOrientation = screenOrientation),
             screenOrientation = screenOrientation,
             audioBitrateKbps = cfg.audioBitrateKbps,
-            audioSampleRateHz = cfg.audioSampleRateHz
+            audioSampleRateHz = cfg.audioSampleRateHz,
+            micCapture = mic
         )
 
         if (files != null) {
             isRecording = true
-            recordingStartTime = System.currentTimeMillis()
-            startRecordingTimer()
             lockOrientationControls(true)
 
             // Swap both Record buttons to the green-square "stop" variant.
             applyMainRecordButtonState()
             applyFullscreenRecordButtonState()
 
-            binding.statusTitle.setText(R.string.recording_in_progress)
+            // The timer starts when the cameras really deliver frames (onRecordingStarted).
+            binding.statusTitle.setText(R.string.recording_starting)
             binding.statusDetail.setText(R.string.status_recording_detail)
+            binding.elapsedText.text = getString(R.string.recording_elapsed_default)
             binding.elapsedText.visibility = View.VISIBLE
 
-            // Re-apply the user's zoom level on the freshly-created recording
-            // controllers. startRecording() builds new CameraController instances
-            // whose internal linearZoom is 0, so without this the recorded video
-            // would lose the zoom the user set during preview.
-            dualCameraRecorder.reapplyLinearZoom(frontLinearZoom, rearLinearZoom)
+            // Keep camera and microphone access when the screen turns off or the user
+            // switches app, and keep the screen on while recording.
+            RecordingService.start(this)
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-            Toast.makeText(this, R.string.recording_started, Toast.LENGTH_SHORT).show()
+            if (mic == null || !mic.isCapturing.get()) {
+                Toast.makeText(this, R.string.recording_no_audio, Toast.LENGTH_LONG).show()
+            }
         } else {
             isRecording = false
-            // Live mic capture remains running — no restart needed
-            Toast.makeText(this, R.string.recording_error, Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                getString(R.string.recording_error, getString(R.string.recording_error_start)),
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
     private fun stopRecording() {
-        if (!isRecording) return
-
-        dualCameraRecorder.stopRecording()
+        if (!isRecording || isFinishingRecording) return
+        isFinishingRecording = true
         stopRecordingTimer()
+        // The files are finalized in the background; onRecordingFinished() restores the
+        // UI and restarts the preview when they are complete.
+        binding.recordButton.isEnabled = false
+        binding.btnRecordFullscreen.isEnabled = false
+        binding.statusTitle.setText(R.string.recording_saving)
+        dualCameraRecorder.stopRecording()
+    }
 
+    /**
+     * The recorded files are finalized (after Stop, or after a failure: [error] non-null).
+     * Null files were not produced (their camera never delivered video).
+     */
+    private fun onRecordingFinished(frontFile: java.io.File?, rearFile: java.io.File?, error: Throwable?) {
         isRecording = false
-        lockOrientationControls(false)
+        isFinishingRecording = false
+        stopRecordingTimer()
+        RecordingService.stop(this)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (isDestroyed || isFinishing) return
 
+        lockOrientationControls(false)
+        binding.recordButton.isEnabled = true
+        binding.btnRecordFullscreen.isEnabled = true
         // Restore both Record buttons to the red-circle "start" variant.
         applyMainRecordButtonState()
         applyFullscreenRecordButtonState()
-
         binding.statusTitle.setText(R.string.service_stopped)
         binding.statusDetail.setText(R.string.status_idle_detail)
         binding.elapsedText.visibility = View.GONE
 
-        // Restart the preview cameras after stopping the recording. DualCameraRecorder.stopRecording()
-        // closes the camera devices but leaves the frontController/rearController references alive
-        // pointing at the now-closed cameras, so the TextureViews keep their last frame and look
-        // frozen until the user toggles fullscreen (which closes the preview and reopens it on the
-        // other surface set). Reuse the same flow as enter/exitFullscreen — fully close the
-        // preview, wait for the cameras to release, then re-arm on the active surface set.
-        stopCurrentPreviewAndWait()
-        // Release the re-entrancy guard in case any prior start path left it set; otherwise
-        // startCamerasIfReady / startFullscreenCamerasIfReady would return immediately and the
-        // previews would stay frozen.
-        camerasStarting = false
-        if (isFullscreen) startFullscreenCamerasIfReady() else startCamerasIfReady()
+        // Normally the recorder already switched the cameras back to preview; otherwise
+        // (a camera failed) re-open the preview on the visible surface set. In the
+        // background everything is released and re-opened by onStart.
+        if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            if (!dualCameraRecorder.isPreviewActive()) {
+                stopCurrentPreviewAndWait()
+                camerasStarting = false
+                if (isFullscreen) startFullscreenCamerasIfReady() else startCamerasIfReady()
+            } else {
+                requestPreviewTransforms()
+            }
+            restartMicObservation()
+        } else {
+            releasedInBackground = true
+            stopCurrentPreview()
+            app.stopLiveMicCapture()
+        }
 
-        // Live mic capture was never stopped, so meters resume automatically.
-        restartMicObservation()
-
-        Toast.makeText(this, R.string.recording_stopped, Toast.LENGTH_SHORT).show()
+        val message = when {
+            frontFile == null && rearFile == null ->
+                getString(R.string.recording_error, error?.message ?: getString(R.string.recording_error_no_video))
+            error != null -> getString(R.string.recording_interrupted, error.message ?: "")
+            else -> getString(R.string.recording_stopped)
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     private fun lockOrientationControls(locked: Boolean) {
@@ -2408,6 +2673,8 @@ class MainActivity : AppCompatActivity() {
         // MediaRecorders, and silently dropping the change would be
         // confusing. Disable the spinners instead so the user can see
         // the values that are in effect for the current recording.
+        binding.frontAspect16x9Checkbox.isEnabled = !locked
+        binding.rearAspect16x9Checkbox.isEnabled = !locked
         binding.frontResolutionSpinner.isEnabled = !locked
         binding.rearResolutionSpinner.isEnabled = !locked
         binding.frontFpsSpinner.isEnabled = !locked
@@ -2518,42 +2785,15 @@ class MainActivity : AppCompatActivity() {
         val flashIcon = if (flashOn) R.drawable.ic_flash_on else R.drawable.ic_flash_off
         binding.btnFlash.setIconResource(flashIcon)
         binding.btnFlashFullscreen.setIconResource(flashIcon)
-        // Mutual exclusion: when the flash is enabled, the "Autofocus on tap"
-        // checkbox is disabled (the two modes cannot coexist).
-        val autofocusEnabled = !flashOn
-        binding.autofocusOnTapCheckbox.isEnabled = autofocusEnabled
-        binding.autofocusOnTapCheckboxFullscreen.isEnabled = autofocusEnabled
-
         Log.d(TAG, "Rear flash: ${if (flashOn) "ON" else "OFF"} (ok=$ok)")
     }
 
-    /**
-     * Refreshes the flash button icon to reflect the current torch state. The button is
-     * disabled when "Autofocus on tap" is checked (the two modes are mutually exclusive —
-     * the user explicitly opts into one or the other via the checkbox). If the current
-     * rear camera has no flash, the icon is just the "off" icon and a hint Toast is shown
-     * on first press.
-     *
-     * The reverse direction is also enforced: when the flash is on, the
-     * "Autofocus on tap" checkboxes (main + fullscreen) are disabled, so the
-     * user cannot tap into the other mode while the torch is firing.
-     */
+    /** Refreshes the flash button icon to reflect the current torch state. */
     private fun updateFlashButton(hasFlash: Boolean) {
-        val autofocusOnTap = settingsStore.config.value.autofocusOnTap
-        // When autofocus-on-tap is enabled, the flash button is disabled because
-        // the user has chosen to use taps to focus instead of the physical flash
-        // button. The two modes are mutually exclusive.
-        binding.btnFlash.isEnabled = !autofocusOnTap
-        binding.btnFlashFullscreen.isEnabled = !autofocusOnTap
         // Icon-only button — only the lightning-bolt icon swaps between on/off.
         val flashIcon = if (flashOn && hasFlash) R.drawable.ic_flash_on else R.drawable.ic_flash_off
         binding.btnFlash.setIconResource(flashIcon)
         binding.btnFlashFullscreen.setIconResource(flashIcon)
-        // Mutual exclusion (reverse direction): when the flash is on, the
-        // "Autofocus on tap" checkboxes are disabled.
-        val autofocusEnabled = !flashOn
-        binding.autofocusOnTapCheckbox.isEnabled = autofocusEnabled
-        binding.autofocusOnTapCheckboxFullscreen.isEnabled = autofocusEnabled
     }
 
     /**
@@ -2858,22 +3098,14 @@ class MainActivity : AppCompatActivity() {
         binding.digitalMeterFrontFullscreen.setBrighterMode(true)
         binding.digitalMeterRearFullscreen.setBrighterMode(true)
 
-        // In landscape the user asked for the fullscreen previews to keep a 4:3
-        // aspect ratio, so we resize the content frame accordingly. In portrait the
-        // overlay fills the whole screen as before.
+        // In landscape the fullscreen previews keep the shape of the recording (4:3 or
+        // 16:9), so we resize the content frame accordingly. In portrait the overlay
+        // fills the whole screen as before.
         applyFullscreenContentSizing()
 
-        // The "Front Camera" / "Rear Camera" labels are placed at the top of each
-        // preview frame in XML, but in portrait fullscreen each frame is
-        // half-screen-wide × screen-height while the camera buffer is 4:3 (displayed
-        // 3:4). FIT_CENTER fits the image to the frame width and leaves equal
-        // vertical letterbox bars above and below the visible video. The static
-        // 12dp top margin would put the labels inside that upper letterbox — far
-        // above the video itself. Shift the labels down so they sit just above the
-        // top edge of the visible video. The layout settles asynchronously after
-        // the orientation switch above, so post() until the frame has its final
-        // dimensions.
-        binding.root.post { positionFullscreenLabels() }
+        // The "Front Camera" / "Rear Camera" labels follow the visible video: they are
+        // re-aligned with every preview transform (see alignLabelWithVideo), which runs
+        // again when the frames take their fullscreen size.
 
         if (isRecording) {
             // The capture session was set up with BOTH the main and fullscreen
@@ -2952,8 +3184,8 @@ class MainActivity : AppCompatActivity() {
      *
      * - Portrait (3:4 vertical): width fills the screen, height = screen - bottom panel,
      *   anchored to TOP so the user can read the controls below.
-     * - Landscape (4:3 horizontal): the two preview cards are sized so each card is
-     *   exactly 4:3 (matching the main activity's preview card aspect ratio). The
+     * - Landscape: the two preview cards are sized so each card has the shape of the
+     *   recording, 4:3 or 16:9 (matching the main activity's preview cards). The
      *   content frame spans the full screen width, with each card getting half the
      *   width. The frame is centred vertically — the bottom controls panel may
      *   cover the bottom of the cards, but the user can hide the controls via
@@ -2966,13 +3198,12 @@ class MainActivity : AppCompatActivity() {
         // 240dp bottom panel -> subtract its pixel height from the available area.
         val bottomPanelPx = (240f * resources.displayMetrics.density).toInt()
         if (isLandscapeMode) {
-            // Two 4:3 cards side by side fill the full screen width. The total
-            // content height is screenW * 3 / 8 so each card is cardW=screenW/2 wide
-            // and cardH=screenW/2 * 3/4 = screenW * 3/8 tall (4:3 ratio). This matches
-            // the main activity's card sizing, so the FIT_CENTER transform produces
-            // a preview that fills the card exactly (no letterbox bars).
+            // Two cards side by side fill the full screen width, each screenW/2 wide
+            // and as tall as the recording shape gives (3/4 or 9/16 of the width). This
+            // matches the main activity's card sizing, so the FIT_CENTER transform
+            // produces a preview that fills the card exactly (no letterbox bars).
             val contentW = screenW
-            val contentH = (screenW * 3 / 8).coerceAtLeast(1)
+            val contentH = landscapeHeightFor(screenW / 2).coerceAtLeast(1)
             frame.width = contentW
             frame.height = contentH
             frame.gravity = android.view.Gravity.CENTER
@@ -2985,67 +3216,6 @@ class MainActivity : AppCompatActivity() {
             frame.gravity = android.view.Gravity.TOP
         }
         binding.fullscreenContentFrame.layoutParams = frame
-
-        // The frame dimensions may have just changed — reposition the labels so
-        // they sit at the top of the visible video (portrait) or stay at the
-        // frame top (landscape).
-        positionFullscreenLabels()
-    }
-
-    /**
-     * Align the "Front Camera" / "Rear Camera" labels with the top edge of the
-     * VISIBLE video, not the top of the preview frame.
-     *
-     * In portrait fullscreen each preview frame is half-screen-wide × screen-height
-     * (the content frame has horizontal orientation and weight=1 splits the width
-     * evenly between the two cameras). The camera buffer is 4:3 (width>height),
-     * rendered as 3:4 in portrait via the FIT_CENTER swap in applyPreviewTransform.
-     * FIT_CENTER scales the image to fit the frame width and leaves equal vertical
-     * letterbox bars above and below — the visible video is `(frameW / (3/4)) = frameW
-     * * 4 / 3` tall, centred vertically. The XML anchors each label to `top|start`
-     * of the frame with a 12dp margin, which puts the label inside that top
-     * letterbox — visually far above the video. Here we shift the label down by
-     * the letterbox offset (keeping the 12dp gap from the top of the visible image)
-     * so it sits flush with the top of the video, just inside the frame.
-     *
-     * In landscape fullscreen the frame is sized exactly 4:3 to match the rotated
-     * buffer, so FIT_CENTER produces no vertical letterbox — the labels already sit
-     * at the top of the video via the static 12dp margin. We still (re-)apply the
-     * default margin here in case a previous portrait call left them shifted down,
-     * and we apply the update unconditionally so the call is idempotent across
-     * orientation toggles.
-     *
-     * Only relevant while the fullscreen overlay is visible; in the main activity
-     * the labels live inside their preview cards and follow the cards directly.
-     */
-    private fun positionFullscreenLabels() {
-        if (!isFullscreen) return
-        val marginPx = (12f * resources.displayMetrics.density).toInt()
-        // Pre-rotation image aspect ratio used by FIT_CENTER (see
-        // applyPreviewTransform: effW = srcH, effH = srcW, so effW/effH = 3/4).
-        val imageAspectPortrait = 3f / 4f
-        listOf(
-            binding.fullscreenFrontFrame to binding.fullscreenFrontLabel,
-            binding.fullscreenRearFrame to binding.fullscreenRearLabel
-        ).forEach { (frame, label) ->
-            val w = frame.width
-            val h = frame.height
-            if (w <= 0 || h <= 0) return@forEach
-            val lp = label.layoutParams as android.widget.FrameLayout.LayoutParams
-            lp.topMargin = if (!isLandscapeMode) {
-                // Portrait: 3:4 image fills the frame width, vertical letterbox
-                // top + bottom. Shift the label down to sit just above the image.
-                val videoH = w / imageAspectPortrait
-                val letterbox = ((h - videoH) / 2f).toInt().coerceAtLeast(0)
-                letterbox + marginPx
-            } else {
-                // Landscape: frame is exactly 4:3 (set in applyFullscreenContentSizing)
-                // so FIT_CENTER has no vertical letterbox. Restore the default 12dp
-                // top margin in case a previous portrait call shifted it.
-                marginPx
-            }
-            label.layoutParams = lp
-        }
     }
 
     private fun exitFullscreen() {
@@ -3099,7 +3269,7 @@ class MainActivity : AppCompatActivity() {
     // ==================== Settings ====================
 
     private fun showSettingsSheet() {
-        SettingsBottomSheet(this, settingsStore) {
+        SettingsBottomSheet(this, settingsStore, isRecording = { isRecording || isFinishingRecording }) {
             // Theme or language changed - recreate activity for resource reload.
             // Stash the currently selected cameras in the Application's transient
             // holder so the freshly created Activity restores them instead of
@@ -3128,15 +3298,12 @@ class MainActivity : AppCompatActivity() {
         return if (isLandscapeMode) StreamOrientation.LANDSCAPE else StreamOrientation.PORTRAIT
     }
 
-    private fun resolutionLabels(): List<String> {
-        val orientation = currentStreamOrientation()
-        return StreamResolution.entries.map { it.labelFor(orientation) }
-    }
-    private fun fpsLabels(): List<String> = StreamFps.entries.map { it.label }
-    private fun bitrateLabels(): List<String> = StreamBitrate.entries.map { it.label }
 
     companion object {
         const val TAG = "MainActivity"
+
+        /** Max re-posts (50 ms apart) of a preview transform while the cameras are unknown. */
+        private const val MAX_TRANSFORM_RETRIES = 40
 
         // ISO options from ISO 12232 standard (full progression up to 1000000)
         val isoValues = arrayOf(

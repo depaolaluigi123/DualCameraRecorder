@@ -2,7 +2,7 @@
 
 An offline, single-device Android application that records video from the **front and rear cameras simultaneously** into two separate MP4 files, with a synchronized audio track captured from the device microphone.
 
-The app is built around the **Camera2 API** and **`MediaRecorder`** and runs as a foreground service so that recording is not interrupted when the activity is in the background or the screen is off.
+The app is built around the **Camera2 API** and **`MediaCodec` + `MediaMuxer`** (two H.264 encoders and one shared stereo AAC encoder). While recording it runs a foreground service, so the recording is not interrupted when the activity is in the background or the screen is off.
 
 ---
 
@@ -10,24 +10,24 @@ The app is built around the **Camera2 API** and **`MediaRecorder`** and runs as 
 
 ### Simultaneous dual-camera recording
 - Live preview of both cameras side-by-side (portrait) or stacked (landscape).
-- Pressing **Record** starts two `MediaRecorder` sessions in lock-step, each writing to its own MP4 file inside `Movies/DualCameraRecording/<timestamp>/`.
-- The cameras are picked from the device's reported `concurrentCameraIds` so the pair is guaranteed to run together. If the desired combination is not supported, the app automatically falls back to a working pair and notifies the user.
-- Tap-to-focus is available on every preview surface.
+- Pressing **Record** gives the already open cameras a new session with their H.264 encoder: the two MP4 files in `Movies/DualCameraRecording/<timestamp>/` start at the same instant and end together.
+- Many phones cannot run every front + rear combination at the same time (conflicts declared by the hardware, or configurations refused by the HAL). A pair that does not work is detected, remembered and marked in the spinners as "not usable with the other camera"; the front camera keeps previewing alone and a compatible pair is proposed at start-up.
+- Touch the previews as in the camera app: a tap focuses at that point (converted to sensor coordinates: rotation, front mirroring, zoom, 4:3/16:9 framing), a two-finger pinch zooms in or out (the zoom sliders follow). A pinch never triggers a focus cycle.
 
 ### Per-camera video settings
 Each camera can be configured independently:
-- **Resolution** — multiple presets, automatically swapped between 3:4 (portrait) and 4:3 (landscape) when the orientation changes.
-- **Frame rate (FPS)** — the value is requested to the sensor; the camera picks the nearest supported value.
-- **Bitrate** — several bitrate tiers to balance file size and quality.
+- **Resolution** — 4:3 presets from 640x480 to 4032x3024, or 16:9 presets from 640x360 to 3840x2160 (4K) when the camera's **16:9 framing** checkbox is ticked. Each camera has its own checkbox, so one can record 4:3 and the other 16:9; the preview of each camera switches to the same framing. The checkbox reads 16:9 / 4:3 in landscape and 9:16 / 3:4 in portrait. Each shape remembers its own resolution per camera. Dimensions are swapped in portrait. Only the ones supported by the selected camera and the encoder are listed.
+- **Frame rate (FPS)** — the list is read from the selected camera: only the frame rates it can hold constant at the chosen resolution are listed; the value is enforced on the sensor and the file has a constant frame rate. Some cameras run slightly faster than the selected rate (e.g. 30.2 fps): the app makes them skip a frame now and then, so the video stays in sync with the audio (with the app in the background the extra frames are kept instead, slightly off the constant grid but still in sync).
+- **Bitrate** — the encoder runs in CBR and the stream is topped up with H.264 filler data when the scene is too simple, so the file bitrate matches the selected one. "Auto" is computed from resolution and FPS and shown in its label. Presets go up to 500 Mbps, but only the values up to the encoder's maximum are listed (100 Mbps on the tested phone). At very high resolutions the encoder may not keep up with the highest bitrates in real time and the frame rate drops (tested phone: 2592x1944 at 30 fps holds 60 Mbps, not 80–100).
 
 ### Manual camera controls (independent per camera)
-- **Manual focus** with a focus-distance seekbar and ± buttons; tap-to-focus re-applies the current distance when manual focus is enabled.
+- **Manual focus** (only on cameras that can focus; on fixed-focus lenses the checkbox is dimmed and says why) with a focus-distance seekbar (covering the whole lens range, from infinity to the closest focus distance) and ± buttons; tap-to-focus re-applies the current distance when manual focus is enabled. It is disabled on fixed-focus cameras.
 - **Manual ISO** and **exposure time** spinners (separate for front and rear).
-- **Flash / torch** control on the rear camera, with proper handling of logical multi-cameras (the torch is routed to the physical sub-camera that owns the flash unit).
+- **Flash / torch** control on the rear camera, usable together with tap-to-focus (the torch state is part of every capture request, the autofocus ones included), with proper handling of logical multi-cameras (the torch is routed to the physical sub-camera that owns the flash unit).
 
 ### Audio capture and metering
-- Audio is captured in **AAC** inside the same MP4 container as the video.
-- Configurable AAC bitrate and sample rate.
+- Audio is captured **once, in stereo** (the same capture that drives the meters) and encoded as **stereo AAC-LC**; the same track is written into both MP4 files.
+- Configurable AAC bitrate and sample rate: only the bitrates AAC can really produce at the selected sample rate are listed.
 - A live audio meter is always on (when microphone permission is granted), with two visual styles:
   - **Digital (DAW)**
   - **Analog (tape style)**
@@ -39,14 +39,14 @@ Each camera can be configured independently:
 - **Light / Dark** theme.
 - **English / Italian** language.
 - A **device-compatibility alert** is shown on first launch and can be dismissed permanently with a "Don't show again" checkbox.
-- All user choices (camera pair, resolution, FPS, bitrate, focus, ISO, exposure, flash, theme, language, meter style) are persisted via DataStore and restored across app restarts.
-- Back-button and exit confirmations prevent accidental interruption; while a recording is in progress, the back button is blocked and the orientation controls are locked.
+- Resolution, FPS, bitrate, audio settings, theme, language and meter style are persisted (SharedPreferences) and restored across app restarts; the camera selection is not persisted.
+- Back-button and exit confirmations prevent accidental interruption; while a recording is in progress, the back button is blocked, the orientation controls are locked and theme / language cannot be changed.
 
 ### Reliability features
-- A foreground service keeps the camera sessions alive when the activity is not visible.
+- While recording, a foreground service (type `camera | microphone`) keeps camera and microphone access when the activity is not visible, and the screen stays on. When not recording, camera and microphone are released in the background and re-opened on return.
 - Re-entrancy guards around camera start/stop prevent the surface-texture and global-layout listeners from racing each other and triggering `ERROR_CAMERA_IN_USE`.
 - Pending camera changes are queued and applied after the in-flight start completes.
-- The recorder uses a robust start order (prepare both `MediaRecorder`s, open the cameras with preview + record surfaces already in the session, wait for both sessions to be configured, only then call `MediaRecorder.start()`) to avoid the Camera2/MediaRecorder contract being violated.
+- The recording starts when both cameras deliver frames: the two files begin at the same instant (same timeline, same audio track). If one camera does not start, the other one still records and the user is told; if none starts, the UI returns to idle with an error message.
 
 ---
 
@@ -56,12 +56,12 @@ Each recording creates a folder inside the device's `Movies/DualCameraRecording/
 
 ```
 Movies/DualCameraRecording/
-  2025-09-01_14-22-08/
+  2025_09_01_14_22_08/
     front.mp4
     rear.mp4
 ```
 
-The two files share a synchronized AAC audio track (one track per file, both captured from the same microphone capture session).
+Both files contain the same stereo AAC audio track, encoded once from the same microphone capture.
 
 ---
 
@@ -84,10 +84,10 @@ The two files share a synchronized AAC audio track (one track per file, both cap
 - **Android Gradle Plugin 8.7.3**, `compileSdk = 34`, `minSdk = 26`, `targetSdk = 34`
 - **Java 17** / **JVM target 17**
 - **Camera2 API** for camera control
-- **`MediaRecorder`** for encoding
+- **`MediaCodec` + `MediaMuxer`** for encoding (H.264 CBR, stereo AAC-LC)
 - **ViewBinding**, Material Components, ConstraintLayout
-- **DataStore (Preferences)** for persisting settings
-- **Foreground service** with type `camera | microphone` for background recording
+- **SharedPreferences** for persisting settings
+- **Foreground service** with type `camera | microphone`, running while recording
 
 ---
 
@@ -110,11 +110,12 @@ app/src/main/
 │   ├── MainViewModel.kt
 │   ├── DualCameraRecorderApp.kt         # Application class, owns the MicStateStore
 │   ├── audio/                           # Microphone capture, gain math, state store
-│   ├── camera/                          # Camera2 + MediaRecorder wrapper, per-camera controllers
-│   ├── data/                            # DataStore-backed preferences repository
+│   ├── camera/                          # Camera2: dual recorder, per-camera controllers, capabilities
+│   ├── data/                            # Preferences repository (SharedPreferences)
 │   ├── locale/                          # Locale manager
 │   ├── model/                           # Configuration models
-│   ├── service/                         # Foreground recording service
+│   ├── recording/                       # H.264/AAC encoders, MP4 muxer, recording session
+│   ├── service/                         # Foreground service while recording
 │   ├── settings/                        # Reactive camera settings store
 │   ├── theme/                           # Light/Dark theme manager
 │   └── ui/                              # Settings bottom sheet, dialogs, focus reticle

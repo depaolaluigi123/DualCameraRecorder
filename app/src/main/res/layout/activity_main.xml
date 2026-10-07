@@ -253,19 +253,6 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
-            <!-- "Autofocus on tap" — enables tap-to-focus on the previews and
-                 disables the flash button. Mutually exclusive with the flash
-                 button. Positioned below the Landscape / Flash / Fullscreen
-                 row per the user's request. -->
-            <CheckBox
-                android:id="@+id/autofocusOnTapCheckbox"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
-                android:text="@string/autofocus_on_tap"
-                android:textColor="@color/color_text_primary"
-                android:textSize="14sp" />
-
             <!-- Preview container: portrait => horizontal (side by side),
                  landscape => vertical (stacked). Toggled in code. -->
             <LinearLayout
@@ -828,6 +815,21 @@
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
+            <CheckBox
+                android:id="@+id/frontAspect16x9Checkbox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="@color/color_text_primary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/frontAspect16x9Hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/color_text_secondary"
+                android:textSize="12sp" />
+
             <TextView
                 android:id="@+id/frontResolutionLabel"
                 android:layout_width="match_parent"
@@ -889,6 +891,21 @@
                 android:textColor="@color/color_text_primary"
                 android:textSize="14sp"
                 android:textStyle="bold" />
+
+            <CheckBox
+                android:id="@+id/rearAspect16x9Checkbox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="@color/color_text_primary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/rearAspect16x9Hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/color_text_secondary"
+                android:textSize="12sp" />
 
             <TextView
                 android:id="@+id/rearResolutionLabel"
@@ -1145,18 +1162,6 @@
                 android:paddingHorizontal="12dp"
                 android:paddingVertical="6dp"
                 android:text="@string/exit_fullscreen"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp" />
-
-            <CheckBox
-                android:id="@+id/autofocusOnTapCheckboxFullscreen"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:buttonTint="#FFFFFF"
-                android:minHeight="0dp"
-                android:paddingHorizontal="2dp"
-                android:text="@string/autofocus_on_tap"
                 android:textColor="#FFFFFF"
                 android:textSize="12sp" />
         </LinearLayout>

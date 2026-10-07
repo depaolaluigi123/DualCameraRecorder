@@ -3,15 +3,15 @@ package com.dualcamerarecording.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.media.AudioFormat
-import android.media.MediaCodecList
-import android.media.MediaFormat
+import android.media.AudioRecord
 import com.dualcamerarecording.model.AppLanguage
+import com.dualcamerarecording.model.AspectRatio
 import com.dualcamerarecording.model.AppThemeMode
 import com.dualcamerarecording.model.CameraAssignment
 import com.dualcamerarecording.model.MeterStyle
 import com.dualcamerarecording.model.StreamBitrate
-import com.dualcamerarecording.model.StreamFps
 import com.dualcamerarecording.model.StreamResolution
+import com.dualcamerarecording.recording.MediaCapabilities
 
 /**
  * SharedPreferences-based settings persistence.
@@ -63,21 +63,13 @@ class PreferencesRepository(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_SHARED_AUDIO_ENABLED, value).apply()
 
     /**
-     * AAC bitrate in kbps. Coerced against [ALLOWED_BITRATES] on read/write so
-     * a stale or hand-edited SharedPreferences value never lands in the UI.
+     * AAC bitrate in kbps. Coerced against [allowedBitratesFor] the stored sample rate
+     * on read/write, so the value always is one the encoder really produces.
      */
     var audioBitrateKbps: Int
-        get() {
-            val stored = prefs.getInt(KEY_AUDIO_BITRATE, DEFAULT_AUDIO_BITRATE_KBPS)
-            val allowed = ALLOWED_BITRATES
-            return if (allowed.isEmpty() || stored in allowed) stored
-                else allowed.firstOrNull() ?: DEFAULT_AUDIO_BITRATE_KBPS
-        }
+        get() = coerceBitrate(prefs.getInt(KEY_AUDIO_BITRATE, DEFAULT_AUDIO_BITRATE_KBPS), audioSampleRateHz)
         set(value) {
-            val allowed = ALLOWED_BITRATES
-            val coerced = if (allowed.isEmpty() || value in allowed) value
-                else allowed.firstOrNull() ?: DEFAULT_AUDIO_BITRATE_KBPS
-            prefs.edit().putInt(KEY_AUDIO_BITRATE, coerced).apply()
+            prefs.edit().putInt(KEY_AUDIO_BITRATE, coerceBitrate(value, audioSampleRateHz)).apply()
         }
 
     /**
@@ -100,15 +92,33 @@ class PreferencesRepository(context: Context) {
             prefs.edit().putInt(KEY_AUDIO_SAMPLE_RATE, coerced).apply()
         }
 
+    // ----------------- Recording shape -----------------
+
+    /** Shape of each camera's recording, 4:3 or 16:9 (the "16:9" checkbox of each camera). */
+    var frontAspect: AspectRatio
+        get() = readAspect(KEY_FRONT_ASPECT_16_9)
+        set(value) = prefs.edit().putBoolean(KEY_FRONT_ASPECT_16_9, value == AspectRatio.RATIO_16_9).apply()
+
+    var rearAspect: AspectRatio
+        get() = readAspect(KEY_REAR_ASPECT_16_9)
+        set(value) = prefs.edit().putBoolean(KEY_REAR_ASPECT_16_9, value == AspectRatio.RATIO_16_9).apply()
+
+    /** Per-camera shape; falls back to the single shared setting of the previous version. */
+    private fun readAspect(key: String): AspectRatio {
+        val wide = if (prefs.contains(key)) prefs.getBoolean(key, false) else prefs.getBoolean(KEY_ASPECT_16_9, false)
+        return if (wide) AspectRatio.RATIO_16_9 else AspectRatio.RATIO_4_3
+    }
+
     // ----------------- Front camera stream config -----------------
 
+    /** Resolution of the camera's current shape: each shape keeps its own choice. */
     var frontResolution: StreamResolution
-        get() = decodeResolution(prefs.getString(KEY_FRONT_RESOLUTION, null))
-        set(value) = prefs.edit().putString(KEY_FRONT_RESOLUTION, value.name).apply()
+        get() = resolutionFor(KEY_FRONT_RESOLUTION, KEY_FRONT_RESOLUTION_16_9, frontAspect)
+        set(value) = saveResolution(KEY_FRONT_RESOLUTION, KEY_FRONT_RESOLUTION_16_9, value)
 
-    var frontFps: StreamFps
-        get() = decodeFps(prefs.getString(KEY_FRONT_FPS, null))
-        set(value) = prefs.edit().putString(KEY_FRONT_FPS, value.name).apply()
+    var frontFps: Int
+        get() = readFps(KEY_FRONT_FPS)
+        set(value) = prefs.edit().putInt(KEY_FRONT_FPS, value).apply()
 
     var frontBitrate: StreamBitrate
         get() = decodeBitrate(prefs.getString(KEY_FRONT_BITRATE, null))
@@ -117,12 +127,12 @@ class PreferencesRepository(context: Context) {
     // ----------------- Rear camera stream config -----------------
 
     var rearResolution: StreamResolution
-        get() = decodeResolution(prefs.getString(KEY_REAR_RESOLUTION, null))
-        set(value) = prefs.edit().putString(KEY_REAR_RESOLUTION, value.name).apply()
+        get() = resolutionFor(KEY_REAR_RESOLUTION, KEY_REAR_RESOLUTION_16_9, rearAspect)
+        set(value) = saveResolution(KEY_REAR_RESOLUTION, KEY_REAR_RESOLUTION_16_9, value)
 
-    var rearFps: StreamFps
-        get() = decodeFps(prefs.getString(KEY_REAR_FPS, null))
-        set(value) = prefs.edit().putString(KEY_REAR_FPS, value.name).apply()
+    var rearFps: Int
+        get() = readFps(KEY_REAR_FPS)
+        set(value) = prefs.edit().putInt(KEY_REAR_FPS, value).apply()
 
     var rearBitrate: StreamBitrate
         get() = decodeBitrate(prefs.getString(KEY_REAR_BITRATE, null))
@@ -131,6 +141,25 @@ class PreferencesRepository(context: Context) {
     // Autofocus-on-tap is intentionally NOT persisted: the user has to
     // pick the tap-focus state on every launch. The system reminder
     // explicitly asked to not save "Tap focus" in SharedPreferences.
+
+    // ----------------- Camera pair compatibility -----------------
+
+    /**
+     * (front id, rear id) pairs this device could not stream together (declared camera
+     * conflict, or stream configuration refused by the camera HAL). Remembered so the app
+     * does not retry them on every launch — a refused configuration can restart the HAL
+     * (on the tested device it took up to ~20 s before any camera worked again).
+     */
+    fun isCameraPairIncompatible(frontId: String, rearId: String): Boolean =
+        pairKey(frontId, rearId) in prefs.getStringSet(KEY_INCOMPATIBLE_PAIRS, emptySet()).orEmpty()
+
+    fun setCameraPairIncompatible(frontId: String, rearId: String, incompatible: Boolean) {
+        val current = prefs.getStringSet(KEY_INCOMPATIBLE_PAIRS, emptySet()).orEmpty().toMutableSet()
+        val changed = if (incompatible) current.add(pairKey(frontId, rearId)) else current.remove(pairKey(frontId, rearId))
+        if (changed) prefs.edit().putStringSet(KEY_INCOMPATIBLE_PAIRS, current).apply()
+    }
+
+    private fun pairKey(frontId: String, rearId: String) = "$frontId|$rearId"
 
     // ----------------- Device compatibility alert -----------------
 
@@ -144,13 +173,34 @@ class PreferencesRepository(context: Context) {
         get() = prefs.getBoolean(KEY_SHOW_COMPAT_ALERT, true)
         set(value) = prefs.edit().putBoolean(KEY_SHOW_COMPAT_ALERT, value).apply()
 
-    private fun decodeResolution(raw: String?): StreamResolution =
-        raw?.let { name -> StreamResolution.entries.firstOrNull { it.name == name } }
-            ?: DEFAULT_FRONT_RESOLUTION
+    /**
+     * The saved resolution for [aspect]. A 16:9 resolution never chosen yet starts from
+     * the counterpart of the 4:3 one (1280x960 -> 1280x720).
+     */
+    private fun resolutionFor(key4x3: String, key16x9: String, aspect: AspectRatio): StreamResolution {
+        val saved4x3 = decodeResolution(prefs.getString(key4x3, null))
+            ?.takeIf { it.aspect == AspectRatio.RATIO_4_3 } ?: DEFAULT_RESOLUTION
+        if (aspect == AspectRatio.RATIO_4_3) return saved4x3
+        return decodeResolution(prefs.getString(key16x9, null))
+            ?.takeIf { it.aspect == AspectRatio.RATIO_16_9 }
+            ?: saved4x3.counterpart(AspectRatio.RATIO_16_9)
+    }
 
-    private fun decodeFps(raw: String?): StreamFps =
-        raw?.let { name -> StreamFps.entries.firstOrNull { it.name == name } }
-            ?: DEFAULT_FPS
+    private fun saveResolution(key4x3: String, key16x9: String, value: StreamResolution) {
+        val key = if (value.aspect == AspectRatio.RATIO_16_9) key16x9 else key4x3
+        prefs.edit().putString(key, value.name).apply()
+    }
+
+    private fun decodeResolution(raw: String?): StreamResolution? =
+        raw?.let { name -> StreamResolution.entries.firstOrNull { it.name == name } ?: LEGACY_RESOLUTIONS[name] }
+
+    /** Frames per second; earlier versions saved an enum name such as "FPS_30". */
+    private fun readFps(key: String): Int =
+        when (val raw = prefs.all[key]) {
+            is Int -> raw
+            is String -> raw.filter { it.isDigit() }.toIntOrNull()
+            else -> null
+        }?.takeIf { it > 0 } ?: DEFAULT_FPS
 
     private fun decodeBitrate(raw: String?): StreamBitrate =
         raw?.let { name -> StreamBitrate.entries.firstOrNull { it.name == name } }
@@ -174,15 +224,23 @@ class PreferencesRepository(context: Context) {
         private const val KEY_AUDIO_BITRATE = "audio_bitrate_kbps"
         private const val KEY_AUDIO_SAMPLE_RATE = "audio_sample_rate_hz"
 
+        /** Shared 16:9 setting of the previous version (read as fallback only). */
+        private const val KEY_ASPECT_16_9 = "aspect_16_9"
+        private const val KEY_FRONT_ASPECT_16_9 = "front_aspect_16_9"
+        private const val KEY_REAR_ASPECT_16_9 = "rear_aspect_16_9"
+
         private const val KEY_FRONT_RESOLUTION = "front_resolution"
+        private const val KEY_FRONT_RESOLUTION_16_9 = "front_resolution_16_9"
         private const val KEY_FRONT_FPS = "front_fps"
         private const val KEY_FRONT_BITRATE = "front_bitrate"
 
         private const val KEY_REAR_RESOLUTION = "rear_resolution"
+        private const val KEY_REAR_RESOLUTION_16_9 = "rear_resolution_16_9"
         private const val KEY_REAR_FPS = "rear_fps"
         private const val KEY_REAR_BITRATE = "rear_bitrate"
 
         private const val KEY_SHOW_COMPAT_ALERT = "show_compat_alert"
+        private const val KEY_INCOMPATIBLE_PAIRS = "incompatible_camera_pairs"
 
         /** Default AAC bitrate in kbps, matching MicGainLevelerApp. */
         const val DEFAULT_AUDIO_BITRATE_KBPS = 128
@@ -194,29 +252,49 @@ class PreferencesRepository(context: Context) {
          */
         const val DEFAULT_AUDIO_SAMPLE_RATE_HZ = 44100
 
-        val DEFAULT_FRONT_RESOLUTION: StreamResolution = StreamResolution.RES_960P
-        val DEFAULT_REAR_RESOLUTION: StreamResolution = StreamResolution.RES_960P
-        val DEFAULT_FPS: StreamFps = StreamFps.FPS_30
+        val DEFAULT_RESOLUTION: StreamResolution = StreamResolution.R1280X960
+        const val DEFAULT_FPS = 30
         val DEFAULT_BITRATE: StreamBitrate = StreamBitrate.AUTO
 
+        /** Resolution names saved by earlier versions (all 4:3). */
+        private val LEGACY_RESOLUTIONS = mapOf(
+            "RES_480P" to StreamResolution.R640X480,
+            "RES_576P" to StreamResolution.R768X576,
+            "RES_768P" to StreamResolution.R1024X768,
+            "RES_960P" to StreamResolution.R1280X960,
+            "RES_1200P" to StreamResolution.R1600X1200,
+            "RES_1440P" to StreamResolution.R1920X1440,
+            "RES_1920P" to StreamResolution.R2560X1920
+        )
+
+        /** AAC bitrate ladder (kbps) before filtering. */
+        private val BITRATE_LADDER = listOf(
+            32, 48, 64, 80, 96, 128, 160, 192, 224, 256,
+            320, 384, 448, 512, 576, 640, 768, 896, 1024
+        )
+
+        /** Recordings are always stereo AAC-LC. */
+        const val AUDIO_CHANNELS = 2
+
         /**
-         * AAC bitrate ladder filtered against the device's hardware AAC encoder's
-         * max bitrate. Resolved lazily.
+         * AAC bitrates (kbps) the encoder really produces for stereo audio at
+         * [sampleRate]: AAC-LC carries at most 6 bits per sample per channel, so the
+         * maximum depends on the sample rate (e.g. 576 kbps at 48 kHz, 96 kbps at 8 kHz).
          */
-        val ALLOWED_BITRATES: List<Int> by lazy {
-            val ladder = listOf(
-                32, 48, 64, 80, 96, 128, 160, 192, 224, 256,
-                320, 384, 448, 512, 576, 640, 768, 896, 1024
-            )
-            val maxBps = aacEncoderMaxBitrateBps()
-            if (maxBps <= 0) ladder
-            else ladder.filter { it * 1000 <= maxBps }.ifEmpty { listOf(128) }
+        fun allowedBitratesFor(sampleRate: Int): List<Int> {
+            val max = MediaCapabilities.aacMaxBitrate(sampleRate, AUDIO_CHANNELS)
+            val min = MediaCapabilities.aacMinBitrate()
+            return BITRATE_LADDER.filter { it * 1000 in min..max }.ifEmpty { listOf(BITRATE_LADDER.first()) }
+        }
+
+        /** [kbps] if allowed at [sampleRate], else the highest allowed value below it. */
+        fun coerceBitrate(kbps: Int, sampleRate: Int): Int {
+            val allowed = allowedBitratesFor(sampleRate)
+            return if (kbps in allowed) kbps else allowed.filter { it <= kbps }.maxOrNull() ?: allowed.first()
         }
 
         /**
-         * Capture sample rates filtered against AudioRecord + the AAC encoder.
-         * Resolved lazily. 44.1 kHz + 48 kHz are always included as a baseline
-         * because they are the two rates every Android device supports.
+         * Capture sample rates supported by both the AAC encoder and AudioRecord in stereo.
          *
          * The list is hardcoded to rates UP TO 48000 Hz per the user request:
          * do not offer higher rates in the UI (88.2, 96, 176.4, 192 kHz are
@@ -226,45 +304,9 @@ class PreferencesRepository(context: Context) {
         val ALLOWED_SAMPLE_RATES: List<Int> by lazy {
             val candidates = listOf(8000, 11025, 16000, 22050, 32000, 44100, 48000)
             candidates.filter { rate ->
-                runCatching {
-                    val sampleFormat = AudioFormat.Builder()
-                        .setSampleRate(rate)
-                        .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .build()
-                    AudioFormat.Builder()
-                        .setSampleRate(rate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .build()
-                    val aac = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, rate, 2)
-                    aac.containsKey(MediaFormat.KEY_SAMPLE_RATE)
-                }.isSuccess
+                MediaCapabilities.isAacSampleRateSupported(rate) &&
+                    AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT) > 0
             }.ifEmpty { listOf(44100, 48000) }
-        }
-
-        /**
-         * Returns the device's hardware AAC encoder max bitrate in bps, or -1
-         * if the encoder is not present.
-         */
-        private fun aacEncoderMaxBitrateBps(): Int {
-            val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-            for (info in list.codecInfos) {
-                if (!info.isEncoder) continue
-                if (info.name.contains("OMX.google.aac", ignoreCase = true) ||
-                    info.name.contains("c2.android.aac", ignoreCase = true) ||
-                    info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_AUDIO_AAC, ignoreCase = true) }
-                ) {
-                    for (type in info.supportedTypes) {
-                        if (!type.equals(MediaFormat.MIMETYPE_AUDIO_AAC, ignoreCase = true)) continue
-                        val caps = info.getCapabilitiesForType(type)
-                        val audioCaps = caps.audioCapabilities ?: continue
-                        val maxBps = audioCaps.bitrateRange?.upper ?: -1
-                        if (maxBps > 0) return maxBps
-                    }
-                }
-            }
-            return -1
         }
     }
 }

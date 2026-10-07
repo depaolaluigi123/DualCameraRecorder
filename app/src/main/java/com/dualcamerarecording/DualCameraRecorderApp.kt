@@ -14,7 +14,7 @@ import com.dualcamerarecording.theme.ThemeManager
 
 /**
  * Application class: initializes preferences, theme, locale, and settings store.
- * Also hosts a shared MicCapture for live audio metering across MainActivity and RecordingService.
+ * Also hosts the shared MicCapture that drives the live audio meters and the recorded audio track.
  * Adapted from AndroidCamera AndroidCameraApp.
  */
 class DualCameraRecorderApp : Application() {
@@ -62,82 +62,93 @@ class DualCameraRecorderApp : Application() {
     }
 
     /**
-     * Shared MicCapture instance for live audio metering.
-     * Initialized and started lazily so meters show real-time levels even
-     * when no recording is in progress. RecordingService reuses this instance
-     * instead of creating its own.
+     * Shared MicCapture instance: it feeds the live meters and, while recording, the
+     * AAC encoder (one capture for both files). Started lazily so meters show
+     * real-time levels even when no recording is in progress.
      */
     var micCapture: MicCapture? = null
         private set
     private val micHandler = Handler(Looper.getMainLooper())
-    private var micCaptureStarted = false
 
     /**
      * Ensure MicCapture is initialized and capturing for live meter display.
-     * Safe to call multiple times — only initializes once.
+     * Safe to call multiple times — only initializes once. The capture runs at the
+     * audio sample rate selected in the settings, because the same capture also feeds
+     * the AAC encoder of the recordings.
      */
     fun ensureMicCaptureStarted() {
-        if (micCaptureStarted) return
-        micCaptureStarted = true
-        micHandler.post {
-            try {
-                val mic = MicCapture()
-                if (mic.initialize(
-                        channelMode = MicCapture.ChannelMode.STEREO,
-                        sampleRate = 44100,
-                        bufferSizeSeconds = 2.0
-                    )) {
-                    // Wire up the monitor tap to feed levels into the shared MicStateStore.
-                    // leftDb  -> left meter  -> front mic; rightDb -> right meter -> rear mic.
-                    // peakLeft/peakRight are the running-max (highest-measured) values.
-                    mic.setMonitorTap(object : MicCapture.MonitorTap {
-                        override fun onAudioLevels(
-                            leftDb: Double,
-                            rightDb: Double,
-                            peakLeft: Double,
-                            peakRight: Double
-                        ) {
-                            micStateStore.updateLiveMeters(
-                                elapsedMs = System.currentTimeMillis(),
-                                leftDb = leftDb,
-                                rightDb = rightDb,
-                                peakDb1 = peakLeft,
-                                peakDb2 = peakRight
-                            )
-                        }
-                    })
-                    micCapture = mic
-                    mic.startCapture()
-                    Log.d(TAG, "Live mic capture started for metering (mode=${mic.channelMode})")
-                } else {
-                    Log.e(TAG, "Failed to initialize MicCapture for live metering")
-                }
-            } catch (e: SecurityException) {
-                Log.e(TAG, "No microphone permission for live metering: ${e.message}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting live mic capture: ${e.message}")
-            }
-        }
+        micHandler.post { startMicCaptureNow() }
     }
 
     /**
-     * Stop and release the shared MicCapture. Called by RecordingService
-     * before it starts its own capture, and by onDestroy for cleanup.
+     * Restart the capture, e.g. after the user picked another sample rate. Queued on the
+     * same handler as start/stop, so the order of calls is always respected.
+     */
+    fun restartMicCapture() {
+        micHandler.post {
+            stopMicCaptureNow()
+            startMicCaptureNow()
+        }
+    }
+
+    private fun startMicCaptureNow() {
+        if (micCapture != null) return
+        val sampleRate = settingsStore.config.value.audioSampleRateHz
+        try {
+            val mic = MicCapture()
+            if (mic.initialize(
+                    channelMode = MicCapture.ChannelMode.STEREO,
+                    sampleRate = sampleRate,
+                    bufferSizeSeconds = 2.0
+                )) {
+                // Wire up the monitor tap to feed levels into the shared MicStateStore.
+                // leftDb  -> left meter  -> front mic; rightDb -> right meter -> rear mic.
+                // peakLeft/peakRight are the running-max (highest-measured) values.
+                mic.setMonitorTap(object : MicCapture.MonitorTap {
+                    override fun onAudioLevels(
+                        leftDb: Double,
+                        rightDb: Double,
+                        peakLeft: Double,
+                        peakRight: Double
+                    ) {
+                        micStateStore.updateLiveMeters(
+                            elapsedMs = System.currentTimeMillis(),
+                            leftDb = leftDb,
+                            rightDb = rightDb,
+                            peakDb1 = peakLeft,
+                            peakDb2 = peakRight
+                        )
+                    }
+                })
+                micCapture = mic
+                mic.startCapture()
+                Log.d(TAG, "Live mic capture started (mode=${mic.channelMode}, $sampleRate Hz)")
+            } else {
+                Log.e(TAG, "Failed to initialize MicCapture for live metering")
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "No microphone permission for live metering: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting live mic capture: ${e.message}")
+        }
+    }
+
+    private fun stopMicCaptureNow() {
+        val mic = micCapture ?: return
+        try {
+            mic.stopCapture()
+            mic.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error releasing live mic: ${e.message}")
+        }
+        micCapture = null
+    }
+
+    /**
+     * Stop and release the shared MicCapture (activity in background or destroyed).
      */
     fun stopLiveMicCapture() {
-        micHandler.post {
-            val mic = micCapture
-            if (mic != null) {
-                try {
-                    mic.stopCapture()
-                    mic.release()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error releasing live mic: ${e.message}")
-                }
-            }
-            micCapture = null
-            micCaptureStarted = false
-        }
+        micHandler.post { stopMicCaptureNow() }
     }
 
     override fun onCreate() {

@@ -27,6 +27,18 @@
         android:textColor="?attr/colorOnSurface"
         android:textSize="22sp" />
 
+    <!-- Shown while recording: theme / language changes recreate the Activity and
+         would stop the recording, so those toggles are disabled. -->
+    <TextView
+        android:id="@+id/settingsLockedHint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/settings_locked_while_recording"
+        android:textColor="?attr/colorError"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
     <TextView
         android:id="@+id/themeLabel"
         android:layout_width="match_parent"

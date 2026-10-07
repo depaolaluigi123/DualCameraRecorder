@@ -26,6 +26,8 @@
     <string name="rear_camera">Rear Camera</string>
     <string name="camera_picker_hint">Choose which physical camera acts as front or rear for this recording session.</string>
     <string name="camera_none_available">No camera found on this device</string>
+    <!-- Camera spinner entry that cannot stream together with the camera selected on the other side. -->
+    <string name="camera_incompatible_label">%1$s — not usable with the other camera</string>
 
     <!-- Preview -->
     <string name="preview_label">Live Preview</string>
@@ -39,22 +41,40 @@
     <string name="recording_elapsed_default">00:00</string>
     <string name="recorded_files">Saved: %1$s</string>
     <string name="recording_error">Recording failed: %1$s</string>
+    <string name="recording_error_start">the recording could not be started</string>
+    <string name="recording_error_no_video">no camera delivered video</string>
+    <string name="recording_interrupted">Recording interrupted: %1$s. The video recorded so far was saved.</string>
+    <string name="recording_starting">Starting…</string>
+    <string name="recording_saving">Saving…</string>
+    <string name="recording_only_front">Only the front camera is recording: the rear camera could not start.</string>
+    <string name="recording_only_rear">Only the rear camera is recording: the front camera could not start.</string>
+    <string name="recording_no_audio">Microphone not available: recording without audio.</string>
+    <string name="notification_channel_recording">Recording</string>
 
     <!-- Video Quality -->
     <string name="resolution_label">Resolution</string>
     <string name="fps_label">Frame Rate (FPS)</string>
     <string name="bitrate_label">Bitrate</string>
-    <string name="fps_hint">This is a request to the camera sensor to achieve the chosen frames per second. The sensor will pick the nearest supported value.</string>
+    <string name="fps_hint">Only the frame rates the selected camera can hold constant are listed.</string>
+    <!-- Label of the "Auto" video bitrate entry: the value computed from resolution and FPS. -->
+    <string name="bitrate_auto_format">Auto (%1$.1f Mbps)</string>
+    <!-- Frame rate entry of the FPS spinners. -->
+    <string name="fps_format">%1$d FPS</string>
+    <!-- Per-camera shape checkbox: %1$s is 16:9 in landscape, 9:16 in portrait. -->
+    <string name="aspect_wide_format">%1$s framing</string>
+    <!-- %1$s: wide shape (16:9 / 9:16); %2$s: standard shape (4:3 / 3:4). -->
+    <string name="aspect_wide_hint_format">This camera records in %1$s and lists %1$s resolutions. Off: %2$s. Only the values the camera supports are listed.</string>
 
     <!-- Orientation -->
     <string name="landscape_mode">Landscape</string>
     <string name="landscape_locked_while_recording">Orientation is locked while recording</string>
 
     <!-- Autofocus on tap -->
-    <string name="autofocus_on_tap">Tap focus</string>
 
     <!-- Manual Controls -->
     <string name="manual_focus_label">Manual Focus</string>
+    <!-- Manual focus checkbox of a camera whose lens cannot focus (fixed focus). -->
+    <string name="manual_focus_unavailable">Manual Focus (not available: fixed-focus lens)</string>
     <string name="manual_focus_front_label">Manual Focus (Front)</string>
     <string name="manual_focus_rear_label">Manual Focus (Rear)</string>
     <string name="manual_focus_hint">Lock autofocus and set the focus distance manually.</string>
@@ -98,7 +118,6 @@
     <string name="toggle_controls">Toggle controls</string>
     <string name="show_controls">Show controls</string>
     <string name="hide_controls">Hide controls</string>
-    <string name="fallback_pair">Switched to %1$s for dual-camera compatibility</string>
 
     <!-- Appearance -->
     <string name="theme_label">Theme</string>
@@ -116,6 +135,8 @@
     <!-- Toast shown after the user picks a theme: confirms the change and
          reminds them a restart is required for full effect. -->
     <string name="theme_restart_toast">Theme changed. Restart the app to apply it fully.</string>
+    <!-- Shown in the settings sheet while recording: theme / language are locked. -->
+    <string name="settings_locked_while_recording">Theme and language cannot be changed while recording.</string>
 
     <!-- Settings -->
     <string name="settings">Settings</string>

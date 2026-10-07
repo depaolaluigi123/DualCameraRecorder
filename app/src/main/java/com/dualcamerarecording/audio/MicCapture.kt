@@ -2,6 +2,7 @@ package com.dualcamerarecording.audio
 
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaRecorder
 import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
@@ -34,7 +35,20 @@ class MicCapture {
     enum class ChannelMode { STEREO, MONO_DUPLICATED }
 
     interface AudioSink {
-        fun onAudioData(samples: ShortArray, numChannels: Int, sampleRate: Int, isMono: Boolean)
+        /**
+         * [samples] holds [frames] interleaved frames of [numChannels] 16-bit channels
+         * (the array may be larger and is reused after the call: copy what you need).
+         * [ptsNs] is the capture time of the first frame on the monotonic clock
+         * (the [System.nanoTime] / camera-encoder time base).
+         */
+        fun onAudioData(
+            samples: ShortArray,
+            frames: Int,
+            numChannels: Int,
+            sampleRate: Int,
+            isMono: Boolean,
+            ptsNs: Long
+        )
     }
 
     interface MonitorTap {
@@ -48,9 +62,19 @@ class MicCapture {
     val isCapturing = AtomicBoolean(false)
     private val isMuted = AtomicBoolean(false)
 
-    private var sampleRate: Int = 44100
+    var sampleRate: Int = 44100
+        private set
     private var audioRecord: AudioRecord? = null
     private var thread: Thread? = null
+
+    // Frames read from the current AudioRecord since startRecording() (probe reads
+    // included), and the latest AudioRecord timestamp anchor mapping a frame position
+    // to the monotonic clock. Together they give each chunk its capture time.
+    private var framesRead = 0L
+    private var anchorFramePosition = -1L
+    private var anchorNanoTime = 0L
+    private var framesAtLastAnchor = Long.MIN_VALUE
+    private val audioTimestamp = AudioTimestamp()
 
     @Volatile private var running = false
 
@@ -120,6 +144,9 @@ class MicCapture {
                 false
             } else {
                 audioRecord = rec
+                framesRead = 0L
+                anchorFramePosition = -1L
+                framesAtLastAnchor = Long.MIN_VALUE
                 rec.startRecording()
                 true
             }
@@ -164,8 +191,31 @@ class MicCapture {
         return ratio > 1e-3
     }
 
-    private fun readForProbe(rec: AudioRecord, buf: ShortArray): Int =
-        try { rec.read(buf, 0, buf.size) } catch (_: Throwable) { 0 }
+    private fun readForProbe(rec: AudioRecord, buf: ShortArray): Int {
+        val read = try { rec.read(buf, 0, buf.size) } catch (_: Throwable) { 0 }
+        if (read > 0) framesRead += read / rec.channelCount
+        return read
+    }
+
+    /**
+     * Capture time (monotonic clock, ns) of frame number [frameIndex] of the current
+     * AudioRecord. Uses an [AudioRecord.getTimestamp] anchor refreshed every ~0.5 s so the
+     * mapping follows the real capture clock; until the first anchor is available the
+     * time is estimated from "now" minus the frames just read.
+     */
+    private fun captureTimeNs(rec: AudioRecord, frameIndex: Long, framesInChunk: Int): Long {
+        if (framesRead - framesAtLastAnchor >= sampleRate / 2) {
+            if (rec.getTimestamp(audioTimestamp, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS) {
+                anchorFramePosition = audioTimestamp.framePosition
+                anchorNanoTime = audioTimestamp.nanoTime
+                framesAtLastAnchor = framesRead
+            }
+        }
+        if (anchorFramePosition >= 0) {
+            return anchorNanoTime + (frameIndex - anchorFramePosition) * 1_000_000_000L / sampleRate
+        }
+        return System.nanoTime() - framesInChunk * 1_000_000_000L / sampleRate
+    }
 
     fun startCapture(): Boolean {
         if (isCapturing.getAndSet(true)) return true
@@ -208,9 +258,16 @@ class MicCapture {
 
         while (running) {
             val read = try { rec.read(buf, 0, chunkShorts) } catch (_: Throwable) { -1 }
-            if (read <= 0) continue
+            if (read <= 0) {
+                // Avoid a busy loop if the AudioRecord is in an error state.
+                try { Thread.sleep(5) } catch (_: InterruptedException) {}
+                continue
+            }
             val frames = read / channels
             if (frames <= 0) continue
+            val firstFrameIndex = framesRead
+            framesRead += frames
+            val ptsNs = captureTimeNs(rec, firstFrameIndex, frames)
 
             val lin1 = GainMath.dbToLinear(leftGainDb)
             val lin2 = GainMath.dbToLinear(rightGainDb)
@@ -220,9 +277,14 @@ class MicCapture {
             var peak2 = 0
 
             if (muted) {
-                // No signal reaches the sinks or the meters.
-                java.util.Arrays.fill(buf, 0, read, 0)
-                dispatchSinks(buf, frames, 2, channelMode == ChannelMode.MONO_DUPLICATED)
+                // No signal reaches the sinks or the meters. Sinks always get stereo.
+                if (channelMode == ChannelMode.STEREO) {
+                    java.util.Arrays.fill(buf, 0, read, 0)
+                    dispatchSinks(buf, frames, 2, false, ptsNs)
+                } else {
+                    java.util.Arrays.fill(stereoOut, 0, frames * 2, 0)
+                    dispatchSinks(stereoOut, frames, 2, true, ptsNs)
+                }
             } else if (channelMode == ChannelMode.STEREO) {
                 // The OS mic delivers (right, left) interleaved on this device,
                 // not the (left, right) the convention assumes. Treat slot 1
@@ -244,7 +306,7 @@ class MicCapture {
                     if (al > peak1) peak1 = al
                     if (ar > peak2) peak2 = ar
                 }
-                dispatchSinks(buf, frames, 2, false)
+                dispatchSinks(buf, frames, 2, false, ptsNs)
             } else {
                 for (i in 0 until frames) {
                     val mono = buf[i].toInt()
@@ -257,7 +319,7 @@ class MicCapture {
                     if (al > peak1) peak1 = al
                     if (ar > peak2) peak2 = ar
                 }
-                dispatchSinks(stereoOut, frames, 2, true)
+                dispatchSinks(stereoOut, frames, 2, true, ptsNs)
             }
 
             if (peak1 > runningPeak1) runningPeak1 = peak1
@@ -271,10 +333,14 @@ class MicCapture {
         }
     }
 
-    private fun dispatchSinks(samples: ShortArray, frames: Int, channels: Int, isMono: Boolean) {
+    private fun dispatchSinks(samples: ShortArray, frames: Int, channels: Int, isMono: Boolean, ptsNs: Long) {
         if (audioSinks.isEmpty()) return
         for (sink in audioSinks) {
-            try { sink.onAudioData(samples, channels, sampleRate, isMono) } catch (_: Throwable) {}
+            try {
+                sink.onAudioData(samples, frames, channels, sampleRate, isMono, ptsNs)
+            } catch (e: Throwable) {
+                Log.w(TAG, "audio sink failed: ${e.message}")
+            }
         }
     }
 

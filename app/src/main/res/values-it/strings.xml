@@ -26,6 +26,7 @@
     <string name="rear_camera">Telecamera posteriore</string>
     <string name="camera_picker_hint">Scegli quale telecamera fisica agisce da frontale o posteriore per questa sessione di registrazione.</string>
     <string name="camera_none_available">Nessuna telecamera trovata su questo dispositivo</string>
+    <string name="camera_incompatible_label">%1$s — non utilizzabile con l\'altra fotocamera</string>
 
     <!-- Preview -->
     <string name="preview_label">Anteprima live</string>
@@ -39,22 +40,35 @@
     <string name="recording_elapsed_default">00:00</string>
     <string name="recorded_files">Salvato: %1$s</string>
     <string name="recording_error">Registrazione fallita: %1$s</string>
+    <string name="recording_error_start">impossibile avviare la registrazione</string>
+    <string name="recording_error_no_video">nessuna fotocamera ha fornito il video</string>
+    <string name="recording_interrupted">Registrazione interrotta: %1$s. Il video registrato fin qui è stato salvato.</string>
+    <string name="recording_starting">Avvio…</string>
+    <string name="recording_saving">Salvataggio…</string>
+    <string name="recording_only_front">Registra solo la fotocamera frontale: la posteriore non è partita.</string>
+    <string name="recording_only_rear">Registra solo la fotocamera posteriore: la frontale non è partita.</string>
+    <string name="recording_no_audio">Microfono non disponibile: registrazione senza audio.</string>
+    <string name="notification_channel_recording">Registrazione</string>
 
     <!-- Video Quality -->
     <string name="resolution_label">Risoluzione</string>
     <string name="fps_label">Frame rate (FPS)</string>
     <string name="bitrate_label">Bitrate</string>
-    <string name="fps_hint">Questo valore e una richiesta al sensore della fotocamera per ottenere il numero di frame al secondo scelto. Il sensore sceglie autonomamente il valore supportato piu vicino.</string>
+    <string name="fps_hint">Sono elencati solo i frame rate che la fotocamera selezionata può mantenere costanti.</string>
+    <string name="bitrate_auto_format">Auto (%1$.1f Mbps)</string>
+    <string name="fps_format">%1$d FPS</string>
+    <string name="aspect_wide_format">Inquadratura %1$s</string>
+    <string name="aspect_wide_hint_format">Questa fotocamera registra in %1$s e l\'elenco mostra le risoluzioni %1$s. Disattivata: %2$s. Sono elencati solo i valori supportati dalla fotocamera.</string>
 
     <!-- Orientation -->
     <string name="landscape_mode">Landscape</string>
     <string name="landscape_locked_while_recording">L\'orientamento è bloccato durante la registrazione</string>
 
     <!-- Autofocus on tap -->
-    <string name="autofocus_on_tap">Tap focus</string>
 
     <!-- Manual Controls -->
     <string name="manual_focus_label">Messa a fuoco manuale</string>
+    <string name="manual_focus_unavailable">Messa a fuoco manuale (non disponibile: obiettivo a fuoco fisso)</string>
     <string name="manual_focus_front_label">Messa a fuoco manuale (Frontale)</string>
     <string name="manual_focus_rear_label">Messa a fuoco manuale (Posteriore)</string>
     <string name="manual_focus_hint">Blocca la messa a fuoco automatica e imposta la distanza di fuoco manualmente.</string>
@@ -98,7 +112,6 @@
     <!-- Suggerimento mostrato sotto il bottone Ripristina telecamere: descrive
          cosa fa il bottone e ricorda che è disattivato durante la registrazione. -->
     <string name="restore_cameras_hint">Chiude e riapre entrambe le telecamere. Disattivato durante la registrazione.</string>
-    <string name="fallback_pair">Passato a %1$s per compatibilità doppia camera</string>
 
     <!-- Appearance -->
     <string name="theme_label">Tema</string>
@@ -113,6 +126,7 @@
     <!-- Toast mostrato dopo la scelta del tema: conferma la modifica e ricorda
          che è necessario riavviare l\'app per applicarla pienamente. -->
     <string name="theme_restart_toast">Tema modificato. Riavvia l\'app per applicarlo correttamente.</string>
+    <string name="settings_locked_while_recording">Tema e lingua non si possono cambiare durante la registrazione.</string>
 
     <!-- Settings -->
     <string name="settings">Impostazioni</string>

@@ -6,11 +6,16 @@ import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.util.Log
 import java.text.DecimalFormat
+import kotlin.math.roundToInt
 
 /**
- * Enumerates available cameras via CameraManager, following the AndroidCamera
- * CameraInventory pattern: probes for extra camera IDs, filters for color output,
- * deduplicates OEM aliases, and includes focal length information for labeling.
+ * Enumerates available cameras via CameraManager: probes for extra camera IDs (OEM aux,
+ * hidden lenses), filters for color output, drops OEM alias ids of the same sensor and
+ * labels each camera with focal length and resolution.
+ *
+ * Alias ids (e.g. "100" / "101" mirroring "0" / "1" on some Xiaomi devices) are skipped:
+ * they describe the same sensor and, on the devices tested, cannot even configure a
+ * normal preview/video stream (the attempt makes the camera HAL restart).
  */
 class CameraInventory(private val context: Context) {
 
@@ -25,13 +30,13 @@ class CameraInventory(private val context: Context) {
         val label: String = cameraId
     )
 
+    private var cached: List<CameraInfo>? = null
+
     /**
-     * Get list of available cameras.
-     * Probes for extra camera IDs (OEM aux, hidden lenses), deduplicates
-     * alias cameras, filters for color output, and includes focal length info.
-     * Matches AndroidCamera's CameraInventory.listBindings pattern.
+     * Get list of available cameras (one entry per sensor, aliases grouped).
      */
     fun getAvailableCameras(): List<CameraInfo> {
+        cached?.let { return it }
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val publicIds = try {
             cameraManager.cameraIdList.toList()
@@ -63,14 +68,14 @@ class CameraInventory(private val context: Context) {
             candidateIds += extra
         }
 
-        // Collect raw camera info
         data class RawCamera(
             val id: String,
             val facing: Int,
             val focal: Float?,
             val fromPublicList: Boolean,
             val hasFlash: Boolean,
-            val isPhysical: Boolean
+            val sensorKey: String,
+            val megapixels: Float
         )
 
         val raw = mutableListOf<RawCamera>()
@@ -87,83 +92,77 @@ class CameraInventory(private val context: Context) {
                 }
 
                 val facing = chars.get(CameraCharacteristics.LENS_FACING) ?: continue
-                val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    ?.minOrNull()
+                val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.minOrNull()
                 val hasFlash = chars.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) ?: false
-                val isPhysical = id in physicalOf
+                val pixels = chars.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                val physicalSize = chars.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                val sensorKey = listOf(
+                    facing,
+                    focal?.let { String.format(java.util.Locale.US, "%.2f", it) },
+                    pixels?.let { "${it.width}x${it.height}" },
+                    physicalSize?.let { String.format(java.util.Locale.US, "%.2fx%.2f", it.width, it.height) }
+                ).joinToString("|")
+                val megapixels = pixels?.let { it.width.toFloat() * it.height / 1_000_000f } ?: 0f
 
-                raw += RawCamera(id, facing, focal, id in publicIds, hasFlash, isPhysical)
-                Log.d(TAG, "Found camera id=$id facing=$facing focalMm=$focal public=${id in publicIds} hasFlash=$hasFlash")
+                raw += RawCamera(id, facing, focal, id in publicIds, hasFlash, sensorKey, megapixels)
+                Log.d(TAG, "Found camera id=$id facing=$facing focalMm=$focal public=${id in publicIds} " +
+                    "hasFlash=$hasFlash sensor=$sensorKey")
             } catch (e: Exception) {
                 Log.w(TAG, "Error reading camera $id: ${e.message}")
             }
         }
 
-        // Deduplicate: drop OEM alias IDs that mirror a public logical camera
-        // (same facing + focal length)
-        val publicKeys = raw.filter { it.fromPublicList }
-            .map { facingFocalKey(it.facing, it.focal) }
-            .toSet()
-        val deduped = raw.filter { entry ->
-            if (entry.fromPublicList) return@filter true
-            if (entry.isPhysical) return@filter true
-            val key = facingFocalKey(entry.facing, entry.focal)
-            val keep = key !in publicKeys
-            if (!keep) Log.i(TAG, "Skipping alias camera id=${entry.id} key=$key")
-            keep
-        }
+        // Keep one id per sensor: the public id (or the first found); other ids with the
+        // same facing / focal length / pixel array / sensor size are OEM aliases.
+        val groups = LinkedHashMap<String, MutableList<RawCamera>>()
+        for (entry in raw) groups.getOrPut(entry.sensorKey) { mutableListOf() } += entry
 
         val result = mutableListOf<CameraInfo>()
         val counters = mutableMapOf<Int, Int>()
-        for (entry in deduped) {
-            val index = (counters[entry.facing] ?: 0) + 1
-            counters[entry.facing] = index
+        for (group in groups.values) {
+            val primary = group.firstOrNull { it.fromPublicList } ?: group.first()
+            group.filter { it !== primary }.forEach {
+                Log.i(TAG, "Skipping alias camera id=${it.id} (same sensor as ${primary.id})")
+            }
+            val index = (counters[primary.facing] ?: 0) + 1
+            counters[primary.facing] = index
 
-            val isLogical = entry.isPhysical && entry.fromPublicList
-            val label = buildLabel(entry.facing, index, entry.focal)
+            val physicalIds = if (primary.fromPublicList && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    cameraManager.getCameraCharacteristics(primary.id).physicalCameraIds.toList()
+                } catch (e: Exception) { emptyList() }
+            } else emptyList()
 
             result.add(
                 CameraInfo(
-                    cameraId = entry.id,
-                    facing = entry.facing,
-                    hasFlash = entry.hasFlash,
-                    physicalIds = if (entry.fromPublicList) {
-                        try {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                cameraManager.getCameraCharacteristics(entry.id).physicalCameraIds.toList()
-                            } else emptyList()
-                        } catch (e: Exception) { emptyList() }
-                    } else emptyList(),
-                    isLogical = isLogical,
-                    focalLengthMm = entry.focal,
+                    cameraId = primary.id,
+                    facing = primary.facing,
+                    hasFlash = primary.hasFlash,
+                    physicalIds = physicalIds,
+                    isLogical = physicalIds.isNotEmpty(),
+                    focalLengthMm = primary.focal,
                     indexAmongFacing = index,
-                    label = label
+                    label = buildLabel(primary.facing, index, primary.focal, primary.megapixels)
                 )
             )
         }
 
+        cached = result
         return result
     }
 
-    private fun buildLabel(facing: Int, index: Int, focal: Float?): String {
+    private fun buildLabel(facing: Int, index: Int, focal: Float?, megapixels: Float): String {
         val facingStr = when (facing) {
             android.hardware.camera2.CameraMetadata.LENS_FACING_FRONT -> "Front"
             android.hardware.camera2.CameraMetadata.LENS_FACING_BACK -> "Back"
             android.hardware.camera2.CameraMetadata.LENS_FACING_EXTERNAL -> "External"
             else -> "Unknown"
         }
-        val df = DecimalFormat("0.0")
-        val focalStr = focal?.let { df.format(it.toDouble()) + "mm" }
-        return if (focalStr != null) {
-            "$facingStr $index ($focalStr)"
-        } else {
-            "$facingStr $index"
-        }
-    }
-
-    private fun facingFocalKey(facing: Int, focal: Float?): String {
-        val f = focal?.let { String.format("%.2f", it) } ?: "?"
-        return "$facing|$f"
+        val details = listOfNotNull(
+            focal?.let { DecimalFormat("0.0").format(it.toDouble()) + "mm" },
+            megapixels.takeIf { it > 0f }?.let { "${it.roundToInt().coerceAtLeast(1)}MP" }
+        )
+        return if (details.isEmpty()) "$facingStr $index" else "$facingStr $index (${details.joinToString(", ")})"
     }
 
     /**

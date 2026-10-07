@@ -23,6 +23,11 @@ import androidx.appcompat.app.AppCompatActivity
 class SettingsBottomSheet(
     private val activity: AppCompatActivity,
     private val settingsStore: CameraSettingsStore,
+    /**
+     * True while a recording is in progress. Theme and language changes recreate the
+     * Activity, which would stop the recording, so they are locked in that case.
+     */
+    private val isRecording: () -> Boolean = { false },
     private val onThemeOrLanguageChanged: () -> Unit
 ) {
 
@@ -30,6 +35,11 @@ class SettingsBottomSheet(
         val dialog = BottomSheetDialog(activity)
         val binding = BottomSheetSettingsBinding.inflate(LayoutInflater.from(activity))
         dialog.setContentView(binding.root)
+
+        val locked = isRecording()
+        listOf(binding.themeLightButton, binding.themeDarkButton,
+            binding.langEnglishButton, binding.langItalianButton).forEach { it.isEnabled = !locked }
+        binding.settingsLockedHint.visibility = if (locked) android.view.View.VISIBLE else android.view.View.GONE
 
         // Persist theme to preferences too — theme is re-read from preferences on
         // recreate(), so without this the Light theme selection was lost on restart.
@@ -63,7 +73,7 @@ class SettingsBottomSheet(
         }
 
         binding.themeToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
+            if (!isChecked || isRecording()) return@addOnButtonCheckedListener
             val mode = when (checkedId) {
                 R.id.themeLightButton -> AppThemeMode.LIGHT
                 else -> AppThemeMode.DARK
@@ -85,7 +95,7 @@ class SettingsBottomSheet(
         }
 
         binding.languageToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
-            if (!isChecked) return@addOnButtonCheckedListener
+            if (!isChecked || isRecording()) return@addOnButtonCheckedListener
             val language = when (checkedId) {
                 R.id.langItalianButton -> AppLanguage.ITALIAN
                 else -> AppLanguage.ENGLISH
